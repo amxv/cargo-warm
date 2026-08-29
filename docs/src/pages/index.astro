@@ -1,0 +1,94 @@
+---
+import { getCollection } from "astro:content";
+import BaseLayout from "zuedocs/layouts/BaseLayout.astro";
+import { primaryNav, siteConfig } from "../data/docs";
+
+const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+
+const proofPoints = [
+  {
+    title: "Rust at the root",
+    body: "Cargo, source, tests, toolchain, and release configuration stay obvious. Web tooling is isolated under docs/."
+  },
+  {
+    title: "One release graph",
+    body: "dist builds native archives and derives shell, PowerShell, and npm installers from the same release artifacts."
+  },
+  {
+    title: "Agent-friendly checks",
+    body: "A small Justfile exposes fast and full validation while keeping the underlying Cargo commands conventional."
+  },
+  {
+    title: "Docs without repo pollution",
+    body: "Astro and ZueDocs live in their own workspace and Vercel skips Rust-only changes."
+  }
+];
+---
+
+<BaseLayout
+  title={`${siteConfig.name} | ${siteConfig.strapline}`}
+  description={siteConfig.description}
+  siteConfig={siteConfig}
+  primaryNav={primaryNav}
+>
+  <section class="hero shell">
+    <div class="hero__copy">
+      <p class="section-label">Rust CLI starter</p>
+      <h1>Build the command. The release and docs machinery is already here.</h1>
+      <p class="hero__lede">
+        mycli starts with a clean Rust application structure, strict checks, cross-platform
+        releases, installers, npm distribution, and a documentation site that stays out of
+        the Cargo workspace.
+      </p>
+      <div class="hero__actions">
+        <a class="button button--solid" href="/docs/quickstart">Quickstart</a>
+        <a class="button button--ghost" href="/docs">Browse docs</a>
+      </div>
+    </div>
+    <aside class="hero__panel">
+      <p class="hero__panel-label">Typical edit loop</p>
+      <div class="hero__terminal">
+        <span>$ just check-fast</span>
+        <span>$ cargo run -- hello agent</span>
+        <span>$ just docs-dev</span>
+        <span>$ dist plan</span>
+      </div>
+    </aside>
+  </section>
+
+  <section class="shell section-grid">
+    <div class="section-heading">
+      <p class="section-label">Baseline</p>
+      <h2>Everything around the idea is intentionally predictable.</h2>
+      <p>
+        Product code belongs in Rust modules. Release configuration belongs in dist-workspace.toml.
+        Documentation tooling belongs in docs/. The boundaries are visible before an agent
+        reads a single implementation file.
+      </p>
+    </div>
+    <div class="proof-grid">
+      {proofPoints.map((item) => (
+        <article class="proof-card">
+          <h3>{item.title}</h3>
+          <p>{item.body}</p>
+        </article>
+      ))}
+    </div>
+  </section>
+
+  <section class="shell docs-teaser">
+    <div class="section-heading">
+      <p class="section-label">Documentation</p>
+      <h2>Start with the project flow, then go deeper only when you need it.</h2>
+    </div>
+    <div class="docs-teaser__grid">
+      {docs.map((entry) => (
+        <a class="docs-teaser__card" href={`/docs/${entry.id}`}>
+          <span>{entry.data.category}</span>
+          <h3>{entry.data.title}</h3>
+          <p>{entry.data.summary ?? entry.data.description}</p>
+        </a>
+      ))}
+    </div>
+  </section>
+</BaseLayout>

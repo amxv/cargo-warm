@@ -1,0 +1,64 @@
+[package]
+name = "mycli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.0"
+description = "A Rust CLI starter with releases, npm distribution, and docs wired up"
+license = "Apache-2.0"
+repository = "https://github.com/amxv/rust-cli-template"
+homepage = "https://github.com/amxv/rust-cli-template#readme"
+readme = "README.md"
+publish = false
+include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
+keywords = ["cli", "rust", "template"]
+categories = ["command-line-utilities"]
+
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "mycli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Fast local development defaults; use `--profile debugging` when full debug
+# information is actually needed.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.dist]
+inherits = "release"
