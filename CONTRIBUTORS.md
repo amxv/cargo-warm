@@ -5,8 +5,7 @@
 - Rust from `rust-toolchain.toml` (currently 1.98.0)
 - `just`
 - Bun for documentation work
-- `dist` 0.32.0 when changing or inspecting release configuration
-- GitHub repository admin access for release/npm/Vercel setup
+- `dist` 0.32.0 when changing release configuration
 
 ## Development
 
@@ -17,11 +16,9 @@ just build
 ./target/debug/cargo-warm --help
 ```
 
-The full Rust check is deliberately conventional: format check, strict Clippy, then tests.
+For cache behavior, prefer temporary repositories and isolated `XDG_CACHE_HOME` values. Do not test GC against a developer's real registry.
 
 ## Docs
-
-The documentation application is isolated in `docs/`:
 
 ```bash
 just docs-install
@@ -30,45 +27,33 @@ just docs-build
 just docs-dev
 ```
 
-Run `docs-check` and `docs-build` serially. Configure Vercel with Root Directory `docs`.
+The documentation application is isolated under `docs/`. Run `docs-check` and `docs-build` serially.
 
 ## Release infrastructure
 
-`dist-workspace.toml` is maintained source. `.github/workflows/release.yml` is generated:
+`dist-workspace.toml` is maintained source and `.github/workflows/release.yml` is generated:
 
 ```bash
 dist plan
 dist generate
 ```
 
-Current distribution defaults:
-
-- GitHub Releases
-- shell installer for macOS/Linux
-- PowerShell installer for Windows
-- npm binary installer package
-- GitHub artifact attestations
-
-## npm publishing
-
-The generated `dist` npm publish job expects a GitHub Actions secret:
-
-```text
-NPM_TOKEN
-```
-
-For the first publish, the token normally needs write access to the scope because the npm package does not exist yet. Store credentials outside the repository.
+Current release targets are Apple Silicon and Intel macOS plus ARM64 and x64 Linux. The release graph produces GitHub Release archives, checksums, a shell installer, and artifact attestations.
 
 ## crates.io
 
-The template itself sets `publish = false`. A real project can opt in during bootstrap with `--crates-io`, after checking that its crate name is available. That makes normal `cargo publish` / `cargo install <crate>` distribution possible; crates.io publisher/trusted-publishing setup remains an explicit owner action.
+The crate is configured as publishable so the public project can support normal Rust installation:
+
+```bash
+cargo install cargo-warm
+```
+
+Before the first publication, run `cargo publish --dry-run` and establish crates.io ownership/trusted publishing explicitly. Do not publish while the repository is intentionally private unless the owner asks for it.
 
 ## Release process
 
-The repository-local release skill is the canonical release procedure:
+The repository-local release skill is canonical:
 
 ```text
 .agents/skills/release/SKILL.md
 ```
-
-Use it whenever cutting, shipping, or publishing a new release.

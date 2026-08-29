@@ -1,7 +1,7 @@
 ---
 title: Docs site maintenance
 description: Maintain the Astro/ZueDocs site without mixing JavaScript tooling into the Rust root.
-order: 5
+order: 90
 category: Reference
 summary: The docs workspace boundary, checks, and Vercel behavior.
 ---

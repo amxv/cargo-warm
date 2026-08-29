@@ -18,11 +18,11 @@ const grouped = docCategories.map((category) => ({
 >
   <section class="shell docs-index-hero">
     <p class="section-label">Documentation</p>
-    <h1>Build, test, document, and release cargo-warm from one predictable repository.</h1>
+    <h1>Make isolated Rust worktrees inherit useful warm build state.</h1>
     <p>
-      The guides separate application work from distribution and docs operations so you can
-      stay in Cargo for normal CLI development and touch the surrounding plumbing only when
-      the project actually needs it.
+      cargo-warm starts with a conservative filesystem-level cache fork. These guides cover the
+      safety model, worktree hooks, lifecycle commands, and the limits that motivate deeper
+      near-hit compiler-state work.
     </p>
   </section>
   <section class="shell docs-index">

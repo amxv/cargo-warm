@@ -3,9 +3,6 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 default:
     @just --list
 
-bootstrap *args:
-    python3 scripts/bootstrap.py {{args}}
-
 fmt:
     cargo fmt --all
 

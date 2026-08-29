@@ -1,63 +1,60 @@
 ---
 title: Command reference
-description: A compact map of the starter CLI and repository commands.
-order: 4
+description: The current cargo-warm command and integration surface.
+order: 5
 category: Reference
-summary: Cargo, Just, docs, bootstrap, and distribution commands in one place.
+summary: path, seed, status, gc, and the flags intended for scripts.
 ---
 
-## Starter CLI
+## `cargo warm path`
 
 ```bash
-cargo-warm --help
-cargo-warm --version
-cargo-warm hello
-cargo-warm hello agent
+cargo warm path
+cargo warm path --workspace /path/to/repo
+cargo warm path --manifest-path Cargo.toml --json
 ```
 
-## Rust development
+Shows Cargo's resolved workspace, build, and target paths.
+
+## `cargo warm seed`
+
+```bash
+cargo warm seed
+cargo warm seed --from /warm/main --to /new/worktree
+cargo warm seed --manifest-path Cargo.toml
+cargo warm seed --manifest-path app/Cargo.toml --manifest-path tools/Cargo.toml
+cargo warm seed --include-target
+cargo warm seed --copy-fallback
+```
+
+`--include-target` clones final/link target outputs in addition to the modern Cargo `build_directory`.
+
+`--copy-fallback` explicitly allows a normal physical copy if a COW/reflink clone is unavailable. It is intentionally opt-in.
+
+## `cargo warm status`
+
+```bash
+cargo warm status
+```
+
+Lists cache roots recorded by cargo-warm.
+
+## `cargo warm gc`
+
+```bash
+cargo warm gc --dry-run
+cargo warm gc
+```
+
+Deletes only recorded cache roots whose destination workspaces are gone.
+
+## Development commands
 
 ```bash
 just check-fast
 just check
 just build
-just build-release
-just run --help
-```
-
-Equivalent primitives remain available directly:
-
-```bash
-cargo fmt --all -- --check
-cargo check --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-```
-
-## Docs
-
-```bash
-just docs-install
-just docs-dev
 just docs-check
 just docs-build
-just docs-test
-```
-
-## Distribution
-
-```bash
 dist plan
-dist generate
-just release-tag 0.2.0
-```
-
-## Bootstrap
-
-```bash
-just bootstrap --help
-just bootstrap \
-  --cli-name pluck \
-  --npm-package @acme/pluck \
-  --description "A fast file picker"
 ```

@@ -1,127 +1,170 @@
 # cargo-warm
 
-A Rust-first template for shipping command-line tools without rebuilding the same OSS plumbing every time.
+`cargo-warm` makes new Rust worktrees start closer to warm by forking Cargo build state from an already-warm checkout into a separate writable cache.
 
-Included from day one:
+It is built for developers and coding agents that create Git worktrees frequently and do not want every new checkout to rebuild the same dependency graph from scratch.
 
-- Rust 2024 CLI structure with `clap`, tests, formatting, and strict Clippy checks
-- pinned Rust toolchain for reproducible local and CI builds
-- `dist`-generated GitHub Releases for macOS, Linux, and Windows
-- shell, PowerShell, and npm installers generated from the same release artifacts
-- GitHub artifact attestations
-- a self-contained Astro/ZueDocs site under `docs/`
-- Vercel affected-path filtering so Rust-only commits do not deploy docs
-- one bootstrap command for project, npm, docs, license, and toolchain identity
-- repo-local release instructions for coding agents
+## Why
 
-## Start a new CLI
+A common workflow looks like this:
 
-Create the repository from this GitHub template:
-
-```bash
-gh repo create acme/pluck \
-  --public \
-  --template amxv/cargo-warm \
-  --clone
-cd pluck
+```text
+main @ A                  warm Cargo state
+   |
+   +-- feature worktree   same starting revision, cold build state
 ```
 
-Initialize its identity:
+Pointing both worktrees at one mutable build directory is fast until concurrent Cargo processes contend on the same state or one checkout invalidates another. `cargo-warm` takes a different approach:
 
-```bash
-just bootstrap \
-  --cli-name pluck \
-  --npm-package @acme/pluck \
-  --description "A fast file picker" \
-  --license Apache-2.0 \
-  --rust-version 1.98.0
+```text
+warm source cache
+       |
+       | APFS clone / filesystem reflink
+       v
+private destination cache
+       |
+       +-- Cargo and rustc validate freshness normally
 ```
 
-The GitHub owner/repository are inferred from `origin` when the repo was created from the template. The Cargo package defaults to the CLI name. Pass `--crate-name` only when the crate and executable genuinely need different names.
+The destination is independently writable. The initial filesystem blocks are shared copy-on-write where the platform supports it.
 
-To make the crate publishable on crates.io as well, add `--crates-io` after confirming the crate name is available. The default is disabled so cloning the template cannot accidentally publish a placeholder package.
+## Install
 
-## Local development
+Install from crates.io:
+
+```bash
+cargo install cargo-warm --locked
+```
+
+The binary is a Cargo subcommand, so both forms work:
+
+```bash
+cargo warm --help
+cargo-warm --help
+```
+
+## Worktree hook
+
+From a newly-created Git worktree whose repository also has a `main` worktree:
+
+```bash
+cargo warm seed
+```
+
+`cargo-warm` discovers the separate `main` checkout, asks Cargo for the actual build-cache paths, and seeds this checkout's private cache.
+
+For editors, agent runtimes, or custom worktree managers, use the explicit primitive:
+
+```bash
+cargo warm seed \
+  --from /path/to/warm/main \
+  --to /path/to/new/worktree
+```
+
+Repositories with multiple Cargo workspaces can repeat `--manifest-path`:
+
+```bash
+cargo warm seed \
+  --manifest-path src-tauri/Cargo.toml \
+  --manifest-path src-tauri/sidecars/server/Cargo.toml
+```
+
+This makes the command easy to call from arbitrary worktree-init scripts without coupling the tool to a particular IDE or agent framework.
+
+## Commands
+
+```bash
+cargo warm path
+cargo warm seed
+cargo warm status
+cargo warm gc
+```
+
+### `path`
+
+Shows the `build_directory` and `target_directory` Cargo resolves for a workspace. `cargo-warm` uses Cargo metadata rather than reverse-engineering workspace path hashes.
+
+```bash
+cargo warm path --workspace /path/to/repo
+cargo warm path --json
+```
+
+### `seed`
+
+Forks warm state into the destination's isolated cache.
+
+```bash
+cargo warm seed
+cargo warm seed --from ../main --to .
+cargo warm seed --include-target
+cargo warm seed --copy-fallback
+```
+
+On modern Cargo versions with a separate `build_directory`, that directory is seeded by default. Final/link outputs in `target_directory` are skipped unless `--include-target` is requested.
+
+The default fast path refuses to silently turn a multi-gigabyte COW operation into a physical copy. `--copy-fallback` is an explicit opt-in.
+
+### `status`
+
+Shows cache roots created by `cargo-warm` and whether their destination worktrees are still available.
+
+### `gc`
+
+Removes only cache roots recorded by `cargo-warm` whose destination worktrees no longer exist.
+
+```bash
+cargo warm gc --dry-run
+cargo warm gc
+```
+
+## Safety model
+
+- Cargo and rustc remain the freshness and correctness authority.
+- Source and destination build directories must be different paths.
+- Active source or destination compiler processes cause seeding to fail rather than copy a torn cache.
+- Cargo and rustc identities must match between source and destination.
+- Cache publication uses a temporary destination plus rename.
+- `gc` only deletes cache roots that `cargo-warm` created and recorded.
+- macOS uses APFS clone-on-write.
+- Linux requires filesystem reflink support for the default fast path.
+- No shared mutable Cargo build directory is introduced.
+
+## What 0.1 solves
+
+The current implementation is the practical cache-fork layer. It can preserve expensive dependency artifacts, build-script output, fingerprints, and rustc incremental state when Cargo considers them reusable after relocation.
+
+It does not yet make every nearby branch behave exactly like an already-warm compiler session. Cargo build-script mtimes, path-bearing build outputs, changed source, feature/configuration differences, and rustc incremental invalidation can still make workspace-local crates rebuild.
+
+The next research layer is to diagnose those misses precisely and select or hydrate the nearest useful compiler state instead of treating one warm checkout as an opaque directory copy.
+
+## Platform support
+
+The fast COW path currently targets:
+
+- macOS on APFS
+- Linux filesystems with reflink support
+
+Windows releases are intentionally not advertised until there is a native safe clone strategy and process-quiescence implementation.
+
+## Development
 
 ```bash
 just check-fast
 just check
 just build
-just run --help
-just run hello agent
 ```
 
-The underlying commands remain ordinary Cargo commands; the `Justfile` is only a memorable project surface.
-
-## Project layout
-
-```text
-Cargo.toml              package identity, dependencies, lints
-Cargo.lock              reproducible application dependency graph
-rust-toolchain.toml     pinned Rust toolchain
-src/main.rs             process boundary only
-src/lib.rs              reusable application entrypoint
-src/cli.rs              clap command model
-src/commands/           command implementations
-tests/                  CLI integration tests
-dist-workspace.toml               release/install distribution config
-scripts/bootstrap.py    one-time/re-runnable identity setup
-docs/                   isolated Astro/ZueDocs application
-.github/workflows/      CI, docs CI, generated release workflow
-.agents/skills/release/ release checklist for future agents
-```
-
-JavaScript dependencies, Astro state, and Vercel configuration live entirely under `docs/`; the repository root stays focused on Rust.
-
-## Docs
+Docs live independently under `docs/`:
 
 ```bash
 just docs-install
-just docs-dev
 just docs-check
 just docs-build
 ```
 
-For Vercel, configure the project Root Directory as `docs`. `docs/vercel.json` skips builds when a push contains no `docs/` changes.
+## Release infrastructure
 
-## Distribution
-
-`dist-workspace.toml` pins `cargo-dist` and generates:
-
-- GitHub release archives for Apple Silicon + Intel macOS, ARM64 + x64 Linux, and x64 Windows
-- `curl | sh` installer
-- PowerShell installer
-- generated npm binary package
-- checksums and GitHub artifact attestations
-
-Inspect a release plan with:
-
-```bash
-dist plan
-```
-
-Regenerate the release workflow after changing `dist-workspace.toml`:
-
-```bash
-dist generate
-```
-
-The generated `.github/workflows/release.yml` is committed. Do not hand-edit it; change `dist-workspace.toml` and regenerate instead.
-
-## Release
-
-Update the version in `Cargo.toml`, update `docs/src/content/docs/changelog.md`, run the checks, commit and push, then tag the exact Cargo version:
-
-```bash
-just check
-just docs-check
-just docs-build
-just release-tag 0.2.0
-```
-
-The tag triggers the generated `dist` workflow. GitHub Releases and installers are published automatically. npm publishing requires a repository secret named `NPM_TOKEN`.
-
-See `.agents/skills/release/SKILL.md` and `CONTRIBUTORS.md` for the full release contract.
+`dist-workspace.toml` generates native GitHub Release archives, checksums, shell installers, and artifact attestations for supported macOS/Linux targets. The same version is published to crates.io for `cargo install cargo-warm`.
 
 ## License
 

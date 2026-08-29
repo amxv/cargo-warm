@@ -1,49 +1,66 @@
 ---
 title: Quickstart
-description: Go from a fresh clone to a checked Rust CLI and local docs site.
+description: Seed a new Rust worktree from an already-warm checkout.
 order: 1
 category: Start
-summary: The shortest path from template clone to product code.
+summary: Put cargo-warm directly in a worktree creation hook.
 ---
 
-## Create the repository
+## Install
+
+Install from crates.io:
 
 ```bash
-gh repo create acme/pluck \
-  --public \
-  --template amxv/cargo-warm \
-  --clone
-cd pluck
+cargo install cargo-warm --locked
 ```
 
-## Initialize project identity
+Both invocation forms are supported:
 
 ```bash
-just bootstrap \
-  --cli-name pluck \
-  --npm-package @acme/pluck \
-  --description "A fast file picker" \
-  --license Apache-2.0 \
-  --rust-version 1.98.0
+cargo warm --help
+cargo-warm --help
 ```
 
-The bootstrap script detects the new GitHub origin and synchronizes Cargo, `dist`, docs, npm, license, and toolchain metadata.
+## Warm the source checkout
 
-## Run the starter
+Use Cargo normally in the checkout you want new worktrees to inherit from:
 
 ```bash
-just check
-cargo run -- --help
-cargo run -- hello agent
+cargo check
 ```
 
-The starter command is intentionally tiny. Replace it rather than building abstractions around the greeting example.
+`cargo-warm` does not own that build. It reuses the state Cargo already created.
 
-## Run the docs site
+## Create and seed a worktree
+
+If the repository has a separate `main` worktree, the short form is enough:
 
 ```bash
-just docs-install
-just docs-dev
+git worktree add ../feature -b feature
+cd ../feature
+cargo warm seed
 ```
 
-The docs application lives completely under `docs/`, including its dependencies and Vercel configuration.
+The new checkout receives its own private writable build cache. On macOS the seed uses an APFS clone. On supported Linux filesystems it uses a reflink.
+
+## Use an explicit source
+
+Worktree managers and agent runtimes usually know both paths already:
+
+```bash
+cargo warm seed \
+  --from /repo/main \
+  --to /repo/worktrees/feature
+```
+
+That explicit form is the stable integration primitive.
+
+## Multiple Cargo workspaces
+
+Repeat `--manifest-path` when one repository contains multiple independent Cargo workspaces:
+
+```bash
+cargo warm seed \
+  --manifest-path src-tauri/Cargo.toml \
+  --manifest-path src-tauri/sidecars/server/Cargo.toml
+```

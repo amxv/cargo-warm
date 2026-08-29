@@ -1,18 +1,18 @@
 ---
 name: release
-description: Use this skill when the user says to cut, ship, publish, or create a new release for this Rust CLI.
+description: Use this skill when the user says to cut, ship, publish, or create a new release for cargo-warm.
 allowed-tools: Bash, Read, Write, Edit
 ---
 
-# Release this Rust CLI
+# Release cargo-warm
 
 Use this skill whenever the user asks for a new release.
 
-`Cargo.toml` owns the package version. `docs/src/content/docs/changelog.md` owns curated release notes. `dist` owns release artifacts, installers, GitHub Release creation, attestations, and npm publication after the version tag reaches GitHub.
+`Cargo.toml` owns the package version. `docs/src/content/docs/changelog.md` owns curated release notes. `dist` owns native release artifacts, the shell installer, GitHub Release creation, checksums, and attestations. crates.io publication is a separate explicit channel.
 
 ## 1. Inspect release state
 
-Start from the repository root and read:
+Read:
 
 ```text
 Cargo.toml
@@ -20,7 +20,7 @@ dist-workspace.toml
 docs/src/content/docs/changelog.md
 ```
 
-Inspect Git/release state:
+Then inspect Git and releases:
 
 ```bash
 git status --short --branch
@@ -30,70 +30,42 @@ gh release list --limit 10
 git log --oneline --decorate -n 30
 ```
 
-Identify the most recent release tag and review the commits/diff since it. Understand any uncommitted changes before editing release metadata.
+Normally release from `main` after the intended commit is pushed.
 
-Normally release from `main` with the branch pushed and synchronized with `origin/main` before the final tag is created.
+## 2. Choose and set the version
 
-## 2. Choose the version
+Use an exact user-supplied version when provided. Otherwise choose the smallest SemVer bump justified by user-visible changes. Before 1.0, use a minor bump for breaking changes and a patch bump for compatible fixes/features unless the owner directs otherwise.
 
-If the user supplied an exact version, use it.
-
-Otherwise choose the smallest SemVer bump justified by user-visible changes since the previous release:
-
-- breaking compatibility change: major bump
-- new backward-compatible functionality: minor bump
-- fixes, performance improvements, or maintenance: patch bump
-- before `1.0.0`, use a minor bump for breaking changes and a patch bump for compatible fixes
-
-Do not reuse an existing tag, GitHub Release version, or npm version.
-
-Update `package.version` in `Cargo.toml`, then run Cargo once without `--locked` so the root package entry in `Cargo.lock` follows the new version. Confirm the resolved package version:
+Update `Cargo.toml`, then refresh the lockfile and verify Cargo metadata reports the exact version:
 
 ```bash
 cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])'
 ```
 
-The value must exactly match the version about to be tagged.
+Do not reuse an existing tag or GitHub Release version.
 
 ## 3. Write the changelog
 
-Update `docs/src/content/docs/changelog.md` manually using the actual changes since the previous release.
+Add the newest entry first in `docs/src/content/docs/changelog.md`.
 
-The new entry should:
-
-- be first in the changelog
-- use the exact version and current release date
-- explain user-visible behavior, fixes, performance changes, compatibility changes, and installation changes
-- combine related commits into concise release notes
-- omit internal refactors and docs-only styling/navigation work unless they materially affect users
-- avoid copying raw commit subjects verbatim
-
-For a maintenance-only release with no direct user-visible behavior change, say so plainly rather than inventing features.
+Focus on user-visible cache behavior, compatibility, performance, installation, command changes, and safety fixes. Omit internal refactors unless they materially affect users.
 
 ## 4. Verify release configuration
 
-Read the pinned `cargo-dist` version from `dist-workspace.toml` and use that exact version.
+Use the exact `cargo-dist-version` pinned in `dist-workspace.toml`.
 
-If `dist-workspace.toml` changed since the previous committed release configuration, regenerate the release workflow before validation:
+If distribution configuration changed, regenerate:
 
 ```bash
 dist generate
 ```
 
-The generated `.github/workflows/release.yml` should match the committed dist configuration.
-
-When npm publishing is configured, confirm the GitHub secret exists without reading its value:
-
-```bash
-gh secret list --json name --jq 'any(.[]; .name == "NPM_TOKEN")'
-```
-
-A missing required publishing secret is a release blocker; configure it through the user's established secure credential path before tagging.
+Do not hand-edit `.github/workflows/release.yml`.
 
 ## 5. Validate
 
-Run from the repository root, serially:
+Run serially:
 
 ```bash
 just check
@@ -103,85 +75,47 @@ dist plan
 git diff --check
 ```
 
-`dist plan` must describe the expected platform archives, checksums, shell installer, PowerShell installer, generated npm package, and release manifest.
+`dist plan` must describe the supported macOS/Linux archives, checksums, shell installer, release manifest, and attestations.
 
-If crates.io publishing is enabled in `Cargo.toml` and this release is intended for crates.io too, also run:
+If the release is also intended for crates.io:
 
 ```bash
 cargo publish --dry-run
 ```
 
-Treat crates.io publication as a separate publication channel with its own authentication/trusted-publisher state.
+Do not publish to crates.io merely because `publish = true`; it requires an explicit release decision and working registry ownership/authentication.
 
 ## 6. Commit and push release preparation
 
-Review the diff. Release preparation normally includes:
-
-- `Cargo.toml`
-- `Cargo.lock`
-- `docs/src/content/docs/changelog.md`
-- `dist-workspace.toml` and generated release workflow only when distribution configuration intentionally changed
-
-Commit and push those changes to the release branch before tagging.
-
-Confirm the pushed commit is the commit intended for release.
+Review the final diff, commit release metadata, and push. Confirm the pushed commit is the exact commit intended for release.
 
 ## 7. Tag the Cargo version
-
-Create the tag through the repository helper:
 
 ```bash
 just release-tag ${VERSION}
 ```
 
-The helper verifies that `${VERSION}` matches Cargo metadata before pushing `v${VERSION}`.
-
-Do not create an alternate tag merely to recover from a failed workflow. Fix the actual failure and retry the same release workflow/tag when possible.
+The helper verifies Cargo metadata before pushing `v${VERSION}`.
 
 ## 8. Watch the release workflow
 
-Find the run created by the pushed tag:
-
 ```bash
 gh run list --workflow release.yml --limit 5
-```
-
-Watch the specific run through completion:
-
-```bash
 gh run watch <run-id> --exit-status
 ```
 
-If it fails, inspect the failed job and fix the underlying issue before declaring the release complete.
+Fix underlying failures before declaring the release complete.
 
-## 9. Verify published outputs
-
-Verify the GitHub Release and its assets:
+## 9. Verify outputs
 
 ```bash
 gh release view "v${VERSION}" --json tagName,name,url,assets
 ```
 
-Verify npm publication using the package identity from `dist-workspace.toml`:
+Confirm the release contains the artifacts described by `dist plan`.
 
-```bash
-npm view "<npm-package>" version dist-tags.latest --json
-```
-
-Confirm the published npm version equals `${VERSION}` and that the GitHub Release contains the artifacts described by `dist plan`.
-
-If crates.io publication was requested, publish/verify it separately and report its status separately from GitHub/npm.
+When crates.io publication was explicitly requested, publish/verify it separately and report that status separately from GitHub Releases.
 
 ## 10. Report completion
 
-Report:
-
-- released version and tag
-- release commit
-- changelog summary
-- validation results
-- GitHub Actions release result
-- GitHub Release URL and artifact set
-- npm package/version
-- crates.io status when applicable
-- any non-blocking warnings
+Report the version/tag, release commit, changelog summary, validation results, GitHub Actions result, GitHub Release URL/artifacts, crates.io status when applicable, and any non-blocking warnings.

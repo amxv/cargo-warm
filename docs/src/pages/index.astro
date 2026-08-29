@@ -7,20 +7,20 @@ const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.
 
 const proofPoints = [
   {
-    title: "Rust at the root",
-    body: "Cargo, source, tests, toolchain, and release configuration stay obvious. Web tooling is isolated under docs/."
+    title: "Private build state",
+    body: "Every worktree keeps its own writable Cargo and rustc state. There is no shared mutable target directory."
   },
   {
-    title: "One release graph",
-    body: "dist builds native archives and derives shell, PowerShell, and npm installers from the same release artifacts."
+    title: "Cheap inheritance",
+    body: "APFS clones on macOS and reflinks on Linux let a warm checkout seed another without physically copying every block up front."
   },
   {
-    title: "Agent-friendly checks",
-    body: "A small Justfile exposes fast and full validation while keeping the underlying Cargo commands conventional."
+    title: "Cargo stays authoritative",
+    body: "A seed is only a starting point. Cargo and rustc still decide what is fresh, stale, or incrementally reusable."
   },
   {
-    title: "Docs without repo pollution",
-    body: "Astro and ZueDocs live in their own workspace and Vercel skips Rust-only changes."
+    title: "Built for hooks",
+    body: "Use one CLI call from an IDE, agent runtime, shell script, or Git worktree hook. No Golden Goose-specific integration is required."
   }
 ];
 ---
@@ -33,37 +33,36 @@ const proofPoints = [
 >
   <section class="hero shell">
     <div class="hero__copy">
-      <p class="section-label">Rust CLI starter</p>
-      <h1>Build the command. The release and docs machinery is already here.</h1>
+      <p class="section-label">Rust worktree cache seeding</p>
+      <h1>New worktree. Near-warm first build.</h1>
       <p class="hero__lede">
-        cargo-warm starts with a clean Rust application structure, strict checks, cross-platform
-        releases, installers, npm distribution, and a documentation site that stays out of
-        the Cargo workspace.
+        cargo-warm forks build state from a checkout that already paid the compile cost into a
+        separate writable cache for the new worktree. You keep isolation without throwing away
+        all of the useful work Cargo and rustc already did.
       </p>
       <div class="hero__actions">
         <a class="button button--solid" href="/docs/quickstart">Quickstart</a>
-        <a class="button button--ghost" href="/docs">Browse docs</a>
+        <a class="button button--ghost" href="/docs/how-it-works">How it works</a>
       </div>
     </div>
     <aside class="hero__panel">
-      <p class="hero__panel-label">Typical edit loop</p>
+      <p class="hero__panel-label">Worktree init hook</p>
       <div class="hero__terminal">
-        <span>$ just check-fast</span>
-        <span>$ cargo run -- hello agent</span>
-        <span>$ just docs-dev</span>
-        <span>$ dist plan</span>
+        <span>$ git worktree add ../feature -b feature</span>
+        <span>$ cd ../feature</span>
+        <span>$ cargo warm seed</span>
+        <span>$ cargo check</span>
       </div>
     </aside>
   </section>
 
   <section class="shell section-grid">
     <div class="section-heading">
-      <p class="section-label">Baseline</p>
-      <h2>Everything around the idea is intentionally predictable.</h2>
+      <p class="section-label">The model</p>
+      <h2>Fork compiler state. Do not share its writable directory.</h2>
       <p>
-        Product code belongs in Rust modules. Release configuration belongs in dist-workspace.toml.
-        Documentation tooling belongs in docs/. The boundaries are visible before an agent
-        reads a single implementation file.
+        A warm main checkout is valuable state. cargo-warm makes that state cheap to inherit while
+        keeping every agent, branch, and worktree independently writable.
       </p>
     </div>
     <div class="proof-grid">
@@ -79,7 +78,7 @@ const proofPoints = [
   <section class="shell docs-teaser">
     <div class="section-heading">
       <p class="section-label">Documentation</p>
-      <h2>Start with the project flow, then go deeper only when you need it.</h2>
+      <h2>Start with the hook, then inspect what Cargo actually reuses.</h2>
     </div>
     <div class="docs-teaser__grid">
       {docs.map((entry) => (
