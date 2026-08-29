@@ -34,6 +34,8 @@ The copied state is never trusted as the answer. After seeding, ordinary Cargo a
 
 This makes a seed a hint about where to start, not a replacement build system.
 
+That distinction matters for worktree relocation. It is tempting to restore destination source mtimes to the warm checkout so Cargo considers copied local artifacts fresh. `cargo-warm` deliberately does not do that. Rust code can observe checkout-local compiler inputs such as `env!("CARGO_MANIFEST_DIR")`; bypassing rustc after relocation can therefore reuse an artifact containing the old checkout path.
+
 ## What can still miss
 
 Even an exact-base worktree can invalidate state because of:
@@ -45,4 +47,6 @@ Even an exact-base worktree can invalidate state because of:
 - changed source;
 - rustc incremental query invalidation.
 
-The next stage of the project is to diagnose these misses precisely and make nearby compiler state more portable and selectable without weakening isolation.
+Use `cargo warm doctor` to separate these failure classes. For an exact clean worktree it identifies mtime skew and build-script boundaries without compiling. `cargo warm doctor --probe` runs `cargo check` under Cargo's fingerprint logger and classifies the actual dirty reasons.
+
+The deeper compiler goal is not to make Cargo blindly accept relocated local artifacts. It is to let Cargo invoke rustc in the destination checkout while rustc starts from a nearby incremental state whose source identities are portable enough that unchanged queries can remain green. Path-sensitive inputs must still be recomputed normally.

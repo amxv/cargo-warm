@@ -76,6 +76,7 @@ This makes the command easy to call from arbitrary worktree-init scripts without
 ```bash
 cargo warm path
 cargo warm seed
+cargo warm doctor
 cargo warm status
 cargo warm gc
 ```
@@ -104,6 +105,26 @@ On modern Cargo versions with a separate `build_directory`, that directory is se
 
 The default fast path refuses to silently turn a multi-gigabyte COW operation into a physical copy. `--copy-fallback` is an explicit opt-in.
 
+### `doctor`
+
+Explains whether a worktree is a good cache-fork candidate before you spend time on a first compile:
+
+```bash
+cargo warm doctor
+cargo warm doctor --from /warm/main --to /new/worktree
+cargo warm doctor --json
+```
+
+For clean worktrees at the same Git revision it reports tracked-file mtime skew, resolved build-cache paths, and local build scripts. This separates a common Cargo freshness problem from deeper rustc incremental reuse problems.
+
+Add `--probe` when you want the actual Cargo rebuild reasons:
+
+```bash
+cargo warm doctor --probe
+```
+
+Probe mode runs `cargo check` with Cargo's fingerprint diagnostics enabled and classifies changed-file, build-script, dependency, environment, compiler, and filesystem misses. It can compile code when the destination is not fresh, so the non-probe mode remains the cheap default.
+
 ### `status`
 
 Shows cache roots created by `cargo-warm` and whether their destination worktrees are still available.
@@ -120,6 +141,7 @@ cargo warm gc
 ## Safety model
 
 - Cargo and rustc remain the freshness and correctness authority.
+- `cargo-warm` does not rewrite source mtimes to trick Cargo into accepting copied local artifacts as fresh.
 - Source and destination build directories must be different paths.
 - Active source or destination compiler processes cause seeding to fail rather than copy a torn cache.
 - Cargo and rustc identities must match between source and destination.
@@ -135,7 +157,7 @@ The current implementation is the practical cache-fork layer. It can preserve ex
 
 It does not yet make every nearby branch behave exactly like an already-warm compiler session. Cargo build-script mtimes, path-bearing build outputs, changed source, feature/configuration differences, and rustc incremental invalidation can still make workspace-local crates rebuild.
 
-The next research layer is to diagnose those misses precisely and select or hydrate the nearest useful compiler state instead of treating one warm checkout as an opaque directory copy.
+`cargo warm doctor` now exposes those misses directly. The deeper research layer is making rustc's local incremental state more relocatable while still letting Cargo invoke rustc in the destination checkout, so path-sensitive inputs are validated instead of bypassed.
 
 ## Platform support
 

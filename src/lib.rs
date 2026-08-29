@@ -15,6 +15,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
     match cli.command {
         Command::Path(args) => commands::path::run(args),
         Command::Seed(args) => commands::seed::run(args),
+        Command::Doctor(args) => commands::doctor::run(args),
         Command::Status => commands::status::run(),
         Command::Gc(args) => commands::gc::run(args),
     }

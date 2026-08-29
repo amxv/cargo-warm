@@ -24,6 +24,7 @@ fn shows_help() {
         .stdout(predicate::str::contains("Usage: cargo-warm"))
         .stdout(predicate::str::contains("seed"))
         .stdout(predicate::str::contains("path"))
+        .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("gc"));
 }

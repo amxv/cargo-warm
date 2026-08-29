@@ -1,9 +1,9 @@
 ---
 title: Command reference
-description: The current cargo-warm command and integration surface.
+description: The current cargo-warm command, diagnostics, and integration surface.
 order: 5
 category: Reference
-summary: path, seed, status, gc, and the flags intended for scripts.
+summary: path, seed, doctor, status, gc, and the flags intended for scripts.
 ---
 
 ## `cargo warm path`
@@ -30,6 +30,30 @@ cargo warm seed --copy-fallback
 `--include-target` clones final/link target outputs in addition to the modern Cargo `build_directory`.
 
 `--copy-fallback` explicitly allows a normal physical copy if a COW/reflink clone is unavailable. It is intentionally opt-in.
+
+## `cargo warm doctor`
+
+```bash
+cargo warm doctor
+cargo warm doctor --from /warm/main --to /new/worktree
+cargo warm doctor --manifest-path Cargo.toml --json
+```
+
+The default mode is read-only with respect to Cargo build state. It reports:
+
+- whether source and destination are at the same Git revision;
+- whether both worktrees are clean;
+- tracked-file mtime skew for an exact clean revision;
+- source and destination build-cache presence;
+- local workspace packages with build scripts.
+
+To ask Cargo why the destination actually rebuilds:
+
+```bash
+cargo warm doctor --probe
+```
+
+Probe mode runs `cargo check` and captures Cargo's fingerprint diagnostics. It can compile code, so use it when you want measured rebuild reasons rather than a cheap preflight.
 
 ## `cargo warm status`
 
