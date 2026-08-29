@@ -73,44 +73,51 @@ pub fn run(args: SeedArgs) -> Result<()> {
 
     let preflight_started = Instant::now();
     cache::assert_workspace_quiescent(&destination)?;
-    let (source, source_reason, pre_resolved_source_paths, source_preflighted) = match args.source {
-        Some(source) => (
-            cache::canonical_dir(&source)?,
-            "explicit --from".to_string(),
-            None,
-            false,
-        ),
-        None => {
-            let selection = select_automatic_source(
-                &destination,
-                &effective.manifests,
-                profile.include_target,
-            )?;
-            (
-                selection.path,
-                selection.reason,
-                Some(selection.paths),
-                true,
-            )
+    let (source, source_reason, source_paths, destination_paths) = thread::scope(|scope| {
+        let destination_paths =
+            scope.spawn(|| cache::resolve_manifests(&destination, &effective.manifests));
+        let (source, source_reason, pre_resolved_source_paths, source_preflighted) =
+            match args.source {
+                Some(source) => (
+                    cache::canonical_dir(&source)?,
+                    "explicit --from".to_string(),
+                    None,
+                    false,
+                ),
+                None => {
+                    let selection = select_automatic_source(
+                        &destination,
+                        &effective.manifests,
+                        profile.include_target,
+                    )?;
+                    (
+                        selection.path,
+                        selection.reason,
+                        Some(selection.paths),
+                        true,
+                    )
+                }
+            };
+        if source == destination {
+            bail!("source and destination workspaces are identical");
         }
-    };
-    if source == destination {
-        bail!("source and destination workspaces are identical");
-    }
+        if !source_preflighted {
+            cache::assert_workspace_quiescent(&source)?;
+            cache::assert_compatible_toolchains(&source, &destination)?;
+        }
+        let source_paths = match pre_resolved_source_paths {
+            Some(paths) => paths,
+            None => cache::resolve_manifests(&source, &effective.manifests)?,
+        };
+        let destination_paths = destination_paths
+            .join()
+            .map_err(|_| anyhow!("destination Cargo metadata worker panicked"))??;
+        Ok::<_, anyhow::Error>((source, source_reason, source_paths, destination_paths))
+    })?;
     println!(
         "cargo-warm: selected source {} ({source_reason})",
         source.display()
     );
-
-    if !source_preflighted {
-        cache::assert_workspace_quiescent(&source)?;
-        cache::assert_compatible_toolchains(&source, &destination)?;
-    }
-    let source_paths = match pre_resolved_source_paths {
-        Some(paths) => paths,
-        None => cache::resolve_manifests(&source, &effective.manifests)?,
-    };
-    let destination_paths = cache::resolve_manifests(&destination, &effective.manifests)?;
     if source_paths.len() != destination_paths.len() {
         bail!("source and destination resolved different manifest counts");
     }
@@ -416,7 +423,35 @@ pub(crate) fn select_automatic_source(
     manifests: &[std::path::PathBuf],
     include_target: bool,
 ) -> Result<AutomaticSource> {
-    let candidates = git::source_worktree_candidates(destination)?;
+    if let Some(source) = select_from_candidates(
+        destination,
+        manifests,
+        include_target,
+        git::exact_worktree_candidates(destination)?,
+    )? {
+        return Ok(source);
+    }
+
+    if let Some(source) = select_from_candidates(
+        destination,
+        manifests,
+        include_target,
+        git::nearby_worktree_candidates(destination)?,
+    )? {
+        return Ok(source);
+    }
+
+    Err(anyhow!(
+        "could not find a quiescent compatible worktree with seedable warm Cargo state; warm another checkout first or pass --from explicitly"
+    ))
+}
+
+fn select_from_candidates(
+    destination: &std::path::Path,
+    manifests: &[std::path::PathBuf],
+    include_target: bool,
+    candidates: Vec<git::SourceSelection>,
+) -> Result<Option<AutomaticSource>> {
     for selection in candidates {
         if !cache::workspace_quiescent(&selection.path).unwrap_or(false)
             || !cache::toolchains_compatible(&selection.path, destination).unwrap_or(false)
@@ -428,15 +463,12 @@ pub(crate) fn select_automatic_source(
         };
         let count = cache::seedable_state_count(&paths, include_target);
         if count > 0 {
-            return Ok(AutomaticSource {
+            return Ok(Some(AutomaticSource {
                 path: selection.path,
                 reason: format!("{}; {count} warm cache root(s)", selection.reason),
                 paths,
-            });
+            }));
         }
     }
-
-    Err(anyhow!(
-        "could not find a quiescent compatible worktree with seedable warm Cargo state; warm another checkout first or pass --from explicitly"
-    ))
+    Ok(None)
 }

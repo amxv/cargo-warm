@@ -3,6 +3,8 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Mutex, OnceLock},
+    thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -53,12 +55,30 @@ pub(crate) enum CloneStrategy {
 
 pub(crate) struct LockfileGuard {
     path: PathBuf,
+}
+
+#[derive(Debug)]
+struct LockfileGuardState {
+    holders: usize,
     existed: bool,
 }
 
+static LOCKFILE_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, LockfileGuardState>>> = OnceLock::new();
+
 impl Drop for LockfileGuard {
     fn drop(&mut self) {
-        if !self.existed {
+        let guards = LOCKFILE_GUARDS.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut guards = guards.lock().expect("lockfile guard registry poisoned");
+        let mut remove_file = false;
+        if let Some(state) = guards.get_mut(&self.path) {
+            state.holders = state.holders.saturating_sub(1);
+            if state.holders == 0 {
+                remove_file = !state.existed;
+                guards.remove(&self.path);
+            }
+        }
+        drop(guards);
+        if remove_file {
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -174,10 +194,20 @@ pub(crate) fn resolve_manifests(
     workspace: &Path,
     manifests: &[PathBuf],
 ) -> Result<Vec<CargoPaths>> {
-    manifests
-        .iter()
-        .map(|manifest| cargo_paths(workspace, manifest))
-        .collect()
+    thread::scope(|scope| {
+        let handles: Vec<_> = manifests
+            .iter()
+            .map(|manifest| scope.spawn(move || cargo_paths(workspace, manifest)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow!("Cargo metadata worker panicked"))?
+            })
+            .collect()
+    })
 }
 
 fn cargo_paths(workspace: &Path, manifest: &Path) -> Result<CargoPaths> {
@@ -257,10 +287,21 @@ pub(crate) fn lockfile_guard(workspace: &Path, manifest: &Path) -> Result<Lockfi
         )
     })?;
     let path = root.join("Cargo.lock");
-    Ok(LockfileGuard {
-        existed: path.exists(),
-        path,
-    })
+    let guards = LOCKFILE_GUARDS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut guards = guards.lock().expect("lockfile guard registry poisoned");
+    match guards.get_mut(&path) {
+        Some(state) => state.holders += 1,
+        None => {
+            guards.insert(
+                path.clone(),
+                LockfileGuardState {
+                    holders: 1,
+                    existed: path.exists(),
+                },
+            );
+        }
+    }
+    Ok(LockfileGuard { path })
 }
 
 pub(crate) fn assert_compatible_toolchains(source: &Path, destination: &Path) -> Result<()> {
@@ -271,16 +312,31 @@ pub(crate) fn assert_compatible_toolchains(source: &Path, destination: &Path) ->
 }
 
 pub(crate) fn toolchains_compatible(source: &Path, destination: &Path) -> Result<bool> {
-    for tool in ["cargo", "rustc"] {
-        let args: &[&str] = if tool == "rustc" { &["-vV"] } else { &["-V"] };
-        let source_id = command_output(Command::new(tool).current_dir(source).args(args))?;
-        let destination_id =
-            command_output(Command::new(tool).current_dir(destination).args(args))?;
-        if source_id != destination_id {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    thread::scope(|scope| {
+        let source_cargo =
+            scope.spawn(|| command_output(Command::new("cargo").current_dir(source).args(["-V"])));
+        let destination_cargo = scope
+            .spawn(|| command_output(Command::new("cargo").current_dir(destination).args(["-V"])));
+        let source_rustc =
+            scope.spawn(|| command_output(Command::new("rustc").current_dir(source).args(["-vV"])));
+        let destination_rustc = scope
+            .spawn(|| command_output(Command::new("rustc").current_dir(destination).args(["-vV"])));
+
+        let source_cargo = source_cargo
+            .join()
+            .map_err(|_| anyhow!("source Cargo identity worker panicked"))??;
+        let destination_cargo = destination_cargo
+            .join()
+            .map_err(|_| anyhow!("destination Cargo identity worker panicked"))??;
+        let source_rustc = source_rustc
+            .join()
+            .map_err(|_| anyhow!("source rustc identity worker panicked"))??;
+        let destination_rustc = destination_rustc
+            .join()
+            .map_err(|_| anyhow!("destination rustc identity worker panicked"))??;
+
+        Ok(source_cargo == destination_cargo && source_rustc == destination_rustc)
+    })
 }
 
 pub(crate) fn assert_workspace_quiescent(workspace: &Path) -> Result<()> {
@@ -725,6 +781,48 @@ fn now_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use super::resolve_manifests;
+
+    #[test]
+    fn parallel_manifests_in_one_workspace_do_not_leave_or_race_cargo_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "cargo-warm-parallel-manifests-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for member in ["one", "two"] {
+            fs::create_dir_all(root.join(member).join("src")).unwrap();
+            fs::write(
+                root.join(member).join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{member}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                ),
+            )
+            .unwrap();
+            fs::write(root.join(member).join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+        }
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"one\", \"two\"]\nresolver = \"3\"\n",
+        )
+        .unwrap();
+
+        let manifests = [
+            PathBuf::from("one/Cargo.toml"),
+            PathBuf::from("two/Cargo.toml"),
+        ];
+        let paths = resolve_manifests(&root, &manifests).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(!root.join("Cargo.lock").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

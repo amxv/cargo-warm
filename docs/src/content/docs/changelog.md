@@ -6,6 +6,13 @@ category: Reference
 summary: New commands, compatibility changes, and cache behavior by release.
 ---
 
+## 0.3.2 - 2026-08-29
+
+- Prefer exact-revision warm worktrees before paying for nearby-branch Git graph ranking, which makes the common new-worktree-from-main path much cheaper.
+- Run Cargo/rustc compatibility probes concurrently and resolve configured Cargo manifests in parallel while preserving lockfile cleanup semantics.
+- Resolve the destination manifest set while automatic warm-source selection runs, reducing worktree provisioning preflight without removing any compatibility or quiescence checks.
+- Keep parallel metadata calls safe when several configured manifests belong to the same workspace and `Cargo.lock` is intentionally absent.
+
 ## 0.3.1 - 2026-08-29
 
 - Replace the macOS cache-tree copy loop with the native APFS `clonefile()` path through a safe Rust reflink wrapper, retaining the parallel metadata-preserving clone implementation as a fallback.

@@ -12,7 +12,6 @@ pub(crate) struct Worktree {
     pub(crate) path: PathBuf,
     pub(crate) head: String,
     pub(crate) branch: Option<String>,
-    pub(crate) dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -21,67 +20,118 @@ pub(crate) struct SourceSelection {
     pub(crate) reason: String,
 }
 
+#[cfg(test)]
 pub(crate) fn source_worktree_candidates(destination: &Path) -> Result<Vec<SourceSelection>> {
+    let (destination, destination_head, candidates) = candidate_worktrees(destination)?;
+    let mut exact = rank_exact_for_head(&candidates, &destination_head)?;
+    exact.extend(rank_nearby_candidates(
+        &destination,
+        &destination_head,
+        &candidates,
+    )?);
+    Ok(exact)
+}
+
+pub(crate) fn exact_worktree_candidates(destination: &Path) -> Result<Vec<SourceSelection>> {
+    let (_, destination_head, candidates) = candidate_worktrees(destination)?;
+    rank_exact_for_head(&candidates, &destination_head)
+}
+
+pub(crate) fn nearby_worktree_candidates(destination: &Path) -> Result<Vec<SourceSelection>> {
+    let (destination, destination_head, candidates) = candidate_worktrees(destination)?;
+    rank_nearby_candidates(&destination, &destination_head, &candidates)
+}
+
+fn candidate_worktrees(destination: &Path) -> Result<(PathBuf, String, Vec<Worktree>)> {
     let destination = destination.canonicalize()?;
     let destination_head = git_text(&destination, &["rev-parse", "HEAD"])?;
     let mut candidates = worktrees(&destination)?;
     candidates.retain(|candidate| candidate.path != destination && candidate.path.is_dir());
+    Ok((destination, destination_head, candidates))
+}
 
+fn rank_exact_for_head(
+    candidates: &[Worktree],
+    destination_head: &str,
+) -> Result<Vec<SourceSelection>> {
     let mut ranked = Vec::new();
-    for candidate in candidates {
-        let exact = candidate.head == destination_head;
-        let (distance, relation) = if exact {
-            (0_u64, "exact revision".to_string())
-        } else {
-            let Ok(merge_base) = git_text(
-                &destination,
-                &["merge-base", &candidate.head, &destination_head],
-            ) else {
-                // The same repository can contain orphan/unrelated histories.
-                // They are not useful nearby seeds for this destination.
-                continue;
-            };
-            let candidate_distance = git_text(
-                &destination,
-                &[
-                    "rev-list",
-                    "--count",
-                    &format!("{merge_base}..{}", candidate.head),
-                ],
-            )?
-            .parse::<u64>()?;
-            let destination_distance = git_text(
-                &destination,
-                &[
-                    "rev-list",
-                    "--count",
-                    &format!("{merge_base}..{destination_head}"),
-                ],
-            )?
-            .parse::<u64>()?;
-            let relation = match (candidate_distance, destination_distance) {
-                (0, behind) => format!("ancestor {behind} commit(s) behind"),
-                (ahead, 0) => format!("descendant {ahead} commit(s) ahead"),
-                (candidate_side, destination_side) => format!(
-                    "nearby branch, {candidate_side}+{destination_side} commit(s) from merge base"
-                ),
-            };
-            (candidate_distance + destination_distance, relation)
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.head == destination_head)
+    {
+        let dirty = is_dirty(&candidate.path).unwrap_or(true);
+        let main = candidate.branch.as_deref() == Some("refs/heads/main");
+        ranked.push((dirty, !main, candidate));
+    }
+    ranked.sort_by_key(|(dirty, not_main, _)| (*dirty, *not_main));
+    Ok(ranked
+        .into_iter()
+        .map(|(dirty, _, candidate)| SourceSelection {
+            path: candidate.path.clone(),
+            reason: format!("exact revision{}", if dirty { ", dirty" } else { "" }),
+        })
+        .collect())
+}
+
+fn rank_nearby_candidates(
+    destination: &Path,
+    destination_head: &str,
+    candidates: &[Worktree],
+) -> Result<Vec<SourceSelection>> {
+    let mut ranked = Vec::new();
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.head != destination_head)
+    {
+        let Ok(_merge_base) = git_text(
+            destination,
+            &["merge-base", &candidate.head, destination_head],
+        ) else {
+            // The same repository can contain orphan/unrelated histories.
+            // They are not useful nearby seeds for this destination.
+            continue;
         };
+        let counts = git_text(
+            destination,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{}...{destination_head}", candidate.head),
+            ],
+        )?;
+        let mut counts = counts.split_whitespace();
+        let candidate_distance = counts
+            .next()
+            .ok_or_else(|| anyhow!("git rev-list did not report candidate distance"))?
+            .parse::<u64>()?;
+        let destination_distance = counts
+            .next()
+            .ok_or_else(|| anyhow!("git rev-list did not report destination distance"))?
+            .parse::<u64>()?;
+        let relation = match (candidate_distance, destination_distance) {
+            (0, behind) => format!("ancestor {behind} commit(s) behind"),
+            (ahead, 0) => format!("descendant {ahead} commit(s) ahead"),
+            (candidate_side, destination_side) => format!(
+                "nearby branch, {candidate_side}+{destination_side} commit(s) from merge base"
+            ),
+        };
+        let distance = candidate_distance + destination_distance;
+        let dirty = is_dirty(&candidate.path).unwrap_or(true);
         let main = candidate.branch.as_deref() == Some("refs/heads/main");
         // Nearness comes first. A quiescent dirty worktree is still a safe
         // incremental starting point because Cargo/rustc validate the forked
         // state and freshness rebasing never blesses dirty source files.
-        ranked.push((distance, candidate.dirty, !main, relation, candidate));
+        ranked.push((distance, dirty, !main, relation, candidate));
     }
 
     ranked.sort_by_key(|a| (a.0, a.1, a.2));
     Ok(ranked
         .into_iter()
-        .map(|(_, _, _, relation, candidate)| {
-            let cleanliness = if candidate.dirty { ", dirty" } else { "" };
+        .map(|(_, dirty, _, relation, candidate)| {
+            let cleanliness = if dirty { ", dirty" } else { "" };
             SourceSelection {
-                path: candidate.path,
+                path: candidate.path.clone(),
                 reason: format!("{relation}{cleanliness}"),
             }
         })
@@ -188,12 +238,10 @@ fn worktrees(workspace: &Path) -> Result<Vec<Worktree>> {
     let mut flush =
         |path: &mut Option<PathBuf>, head: &mut Option<String>, branch: &mut Option<String>| {
             if let (Some(path), Some(head)) = (path.take(), head.take()) {
-                let dirty = is_dirty(&path).unwrap_or(true);
                 result.push(Worktree {
                     path,
                     head,
                     branch: branch.take(),
-                    dirty,
                 });
             }
         };
