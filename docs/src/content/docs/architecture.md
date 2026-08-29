@@ -30,11 +30,15 @@ Among compatible candidates, a worktree with real warm cache roots is preferred.
 
 The selected Cargo intermediate directory is cloned to the destination's resolved path.
 
-- macOS uses clone-on-write when supported by APFS.
+- macOS first uses the native APFS `clonefile()` path through a safe Rust reflink wrapper. The complete directory tree is cloned copy-on-write in one filesystem operation; file metadata used by Cargo remains intact. If that path is unavailable for a tree, cargo-warm falls back to its metadata-preserving parallel APFS clone implementation.
 - Linux uses filesystem reflinks when supported.
 - a physical copy is never an accidental fallback; it requires explicit opt-in.
 
-The clone is written to a temporary path and renamed into place so a partial seed is not published as a completed cache.
+Independent cache roots can be cloned concurrently according to the project-level clone-pressure setting. This is independent of the compiler startup profile.
+
+Each clone is written to a temporary path and renamed into place so a partial seed is not published as a completed cache. If any concurrent clone fails, successful siblings from that batch are rolled back.
+
+While the filesystem is cloning, cargo-warm scans the warm source's cached build-script metadata in parallel. This hides read-only planning work behind the copy-on-write operation instead of serializing every seed phase.
 
 ## 4. Materialize portable native outputs
 

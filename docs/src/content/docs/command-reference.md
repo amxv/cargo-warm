@@ -11,6 +11,7 @@ summary: doctor, seed, check, path, status, and gc.
 ```bash
 cargo warm doctor
 cargo warm doctor --profile deep
+cargo warm doctor --clone-pressure fast
 cargo warm doctor --from /warm/source --to /new/worktree
 cargo warm doctor --probe
 cargo warm doctor --json
@@ -25,6 +26,9 @@ Default mode is read-only with respect to build state. With no warm peer it perf
 ```bash
 cargo warm seed
 cargo warm seed --profile balanced
+cargo warm seed --clone-pressure fast
+cargo warm seed --clone-workers 2
+cargo warm seed --timings
 cargo warm seed --from /warm/source --to /new/worktree
 cargo warm seed --prime-mode rustc
 cargo warm seed --seed-path native/cache
@@ -36,6 +40,9 @@ cargo warm seed --copy-fallback
 Important options:
 
 - `--profile <name>` selects a built-in or project-local profile.
+- `--clone-pressure auto|gentle|fast|max` controls concurrent independent cache-root cloning without changing the compiler profile.
+- `--clone-workers <n>` explicitly sets cache-root concurrency and overrides clone pressure.
+- `--timings` prints seed phase timings for tuning and benchmarking.
 - `--config <path>` uses an explicit config instead of auto-discovery.
 - `--manifest-path <path>` overrides configured manifests; repeatable.
 - `--prime-mode none|rustc|package` overrides the profile's prime.

@@ -1,4 +1,5 @@
 version = 1
 default-profile = "quick"
+clone-pressure = "auto"
 manifests = ["Cargo.toml"]
 unstable-bootstrap = true

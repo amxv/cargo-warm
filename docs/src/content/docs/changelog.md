@@ -6,6 +6,14 @@ category: Reference
 summary: New commands, compatibility changes, and cache behavior by release.
 ---
 
+## 0.3.1 - 2026-08-29
+
+- Replace the macOS cache-tree copy loop with the native APFS `clonefile()` path through a safe Rust reflink wrapper, retaining the parallel metadata-preserving clone implementation as a fallback.
+- Clone independent Cargo cache roots concurrently and add orthogonal `clone-pressure = "auto|gentle|fast|max"` plus `clone-workers = N` project/CLI tuning.
+- Add `cargo warm seed --timings` for phase-level worktree-startup benchmarking and extend `doctor` with clone-root/worker diagnostics.
+- Pipeline cached build-script analysis alongside filesystem cloning, parallelize tracked-file byte proof, and eliminate redundant Cargo-cache traversals during freshness rebasing.
+- Automatic source selection now requires actual seedable warm state instead of falling back to a compatible but cold worktree.
+
 ## 0.3.0 - 2026-08-29
 
 - Add built-in `quick`, `balanced`, and `deep` startup profiles plus project-defined inherited profiles.

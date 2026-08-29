@@ -21,6 +21,62 @@ pub enum PrimeMode {
     Package,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+pub enum ClonePressure {
+    #[default]
+    Auto,
+    Gentle,
+    Fast,
+    Max,
+}
+
+impl std::fmt::Display for ClonePressure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Auto => "auto",
+            Self::Gentle => "gentle",
+            Self::Fast => "fast",
+            Self::Max => "max",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CloneSettings {
+    pub pressure: ClonePressure,
+    pub workers: Option<usize>,
+}
+
+impl Default for CloneSettings {
+    fn default() -> Self {
+        Self {
+            pressure: ClonePressure::Auto,
+            workers: None,
+        }
+    }
+}
+
+impl CloneSettings {
+    pub fn effective_workers(self, tasks: usize) -> usize {
+        if tasks == 0 {
+            return 1;
+        }
+        let available = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(4);
+        let workers = self.workers.unwrap_or_else(|| match self.pressure {
+            ClonePressure::Auto => (available / 4).clamp(1, 4),
+            ClonePressure::Gentle => 1,
+            ClonePressure::Fast => 4,
+            ClonePressure::Max => available.saturating_mul(2).clamp(1, 16),
+        });
+        workers.clamp(1, tasks)
+    }
+}
+
 impl std::fmt::Display for PrimeMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let value = match self {
@@ -47,6 +103,7 @@ pub struct SeedProfile {
 pub struct EffectiveSeedConfig {
     pub config_path: Option<PathBuf>,
     pub profile: SeedProfile,
+    pub clone: CloneSettings,
     pub manifests: Vec<PathBuf>,
 }
 
@@ -58,6 +115,8 @@ struct ProjectConfig {
     manifests: Option<Vec<PathBuf>>,
     unstable_bootstrap: Option<bool>,
     seed_paths: Option<Vec<PathBuf>>,
+    clone_pressure: Option<ClonePressure>,
+    clone_workers: Option<usize>,
     #[serde(default)]
     profiles: BTreeMap<String, ProfileDefinition>,
 }
@@ -86,6 +145,8 @@ pub struct SeedOverrides {
     pub legacy_prime: bool,
     pub prime_mode: Option<PrimeMode>,
     pub unstable_bootstrap: bool,
+    pub clone_pressure: Option<ClonePressure>,
+    pub clone_workers: Option<usize>,
 }
 
 pub fn resolve_seed(workspace: &Path, overrides: SeedOverrides) -> Result<EffectiveSeedConfig> {
@@ -124,6 +185,17 @@ pub fn resolve_seed(workspace: &Path, overrides: SeedOverrides) -> Result<Effect
     }
     append_unique(&mut profile.seed_paths, overrides.seed_paths);
 
+    let clone = CloneSettings {
+        pressure: overrides
+            .clone_pressure
+            .or(project.clone_pressure)
+            .unwrap_or_default(),
+        workers: overrides.clone_workers.or(project.clone_workers),
+    };
+    if clone.workers == Some(0) {
+        bail!("clone-workers must be at least 1");
+    }
+
     let manifests = if !overrides.manifests.is_empty() {
         overrides.manifests
     } else if let Some(manifests) = project.manifests {
@@ -139,6 +211,7 @@ pub fn resolve_seed(workspace: &Path, overrides: SeedOverrides) -> Result<Effect
     Ok(EffectiveSeedConfig {
         config_path,
         profile,
+        clone,
         manifests,
     })
 }
@@ -320,7 +393,7 @@ fn discover_config(workspace: &Path) -> Result<Option<PathBuf>> {
 mod tests {
     use std::fs;
 
-    use super::{PrimeMode, SeedOverrides, resolve_seed};
+    use super::{ClonePressure, PrimeMode, SeedOverrides, resolve_seed};
 
     fn fixture(name: &str) -> std::path::PathBuf {
         let root =
@@ -374,6 +447,49 @@ seed-paths = ["native/cache"]
         )
         .unwrap();
         assert_eq!(resolved.profile.prime, PrimeMode::None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clone_settings_are_project_level_and_orthogonal_to_profiles() {
+        let root = fixture("clone-settings");
+        fs::create_dir_all(root.join(".agents")).unwrap();
+        fs::write(
+            root.join(".agents/.cargo-warm.toml"),
+            r#"
+version = 1
+default-profile = "deep"
+clone-pressure = "fast"
+clone-workers = 2
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_seed(&root, SeedOverrides::default()).unwrap();
+        assert_eq!(resolved.profile.name, "deep");
+        assert_eq!(resolved.profile.prime, PrimeMode::Package);
+        assert_eq!(resolved.clone.pressure, ClonePressure::Fast);
+        assert_eq!(resolved.clone.workers, Some(2));
+        assert_eq!(resolved.clone.effective_workers(8), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clone_worker_override_must_be_positive() {
+        let root = fixture("clone-workers-zero");
+        let error = resolve_seed(
+            &root,
+            SeedOverrides {
+                clone_workers: Some(0),
+                ..SeedOverrides::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("clone-workers must be at least 1")
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

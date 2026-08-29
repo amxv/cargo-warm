@@ -27,6 +27,7 @@ A typical config is:
 ```toml
 version = 1
 default-profile = "balanced"
+clone-pressure = "auto"
 manifests = ["Cargo.toml"]
 unstable-bootstrap = true # stable/beta only; see docs
 ```
@@ -50,6 +51,8 @@ Cargo-warm finds a nearby compatible warm checkout and forks its build state int
 `cargo warm doctor` recommends a starting profile and tells you which alternatives are worth benchmarking.
 
 Projects can define custom profiles in `.agents/.cargo-warm.toml` by inheriting a built-in profile and overriding manifests, seed paths, target inclusion, or priming behavior.
+
+Clone speed is a separate setting. `clone-pressure = "auto"` adapts cache-root concurrency to the machine and repository; `gentle`, `fast`, and `max` trade more I/O pressure for startup latency. `clone-workers = N` is the deterministic override.
 
 For `balanced` and `deep`, use the same relocatable compiler family in the warm source checkout and agent worktrees:
 
@@ -86,6 +89,8 @@ cargo warm gc              # remove orphaned cargo-warm-owned caches
 ```
 
 Use `cargo warm doctor --probe` when you want Cargo's actual fingerprint rebuild reasons, and `--json` when another tool or agent should consume the report.
+
+Use `cargo warm seed --timings` when tuning clone pressure or comparing worktree-startup strategies.
 
 ## Platform support
 

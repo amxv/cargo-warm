@@ -3,6 +3,8 @@ use std::{
     fs,
     io::{BufReader, Read},
     path::{Path, PathBuf},
+    thread,
+    time::Instant,
 };
 
 use anyhow::{Context, Result};
@@ -30,6 +32,12 @@ pub(crate) struct FreshnessReport {
     pub(crate) rebased_build_script_directives: usize,
     pub(crate) synced_watched_entries: usize,
     pub(crate) path_sensitive_outputs: Vec<PathSensitiveOutput>,
+}
+
+#[derive(Debug)]
+pub(crate) struct BuildOutputPlan {
+    pub(crate) path_sensitive_outputs: Vec<PathSensitiveOutput>,
+    pub(crate) materializable_paths: Vec<PathBuf>,
 }
 
 impl FreshnessReport {
@@ -119,6 +127,7 @@ fn analyze_impl(
     Ok(report)
 }
 
+#[cfg(test)]
 pub(crate) fn synchronize(
     source_workspace: &Path,
     destination_workspace: &Path,
@@ -129,42 +138,50 @@ pub(crate) fn synchronize(
         .iter()
         .map(|(source, _)| source.clone())
         .collect();
-    // Fast analysis uses clean Git object identity to classify candidates.
-    // The mutation pass below performs the byte proof exactly once, immediately
-    // before changing destination mtimes.
-    let mut report = analyze_fast(source_workspace, destination_workspace, &source_build_dirs)?;
-    if !report.same_repository {
-        return Ok(report);
-    }
-
-    report.rebased_build_script_directives = rebase_build_script_outputs(
-        source_workspace,
-        destination_workspace,
-        build_pairs,
-        &report.path_sensitive_outputs,
-    )?;
-    if report.blocking_outputs() > 0 {
-        // A cached build-script directive would still point at the source
-        // checkout (or at a destination path that does not exist). Do not make
-        // Cargo source files look fresh in that situation: forcing the build
-        // script to rerun is safer than allowing cross-worktree state leakage.
-        return Ok(report);
-    }
-
-    report.synced_watched_entries = synchronize_build_script_watched_paths(
+    let plan = prepare_build_outputs(source_workspace, destination_workspace, &source_build_dirs)?;
+    synchronize_prepared(
         source_workspace,
         destination_workspace,
         build_pairs,
         package_roots,
-    )?;
+        plan.path_sensitive_outputs,
+    )
+}
 
+pub(crate) fn synchronize_prepared(
+    source_workspace: &Path,
+    destination_workspace: &Path,
+    build_pairs: &[(PathBuf, PathBuf)],
+    package_roots: &BTreeMap<String, PathBuf>,
+    mut path_sensitive_outputs: Vec<PathSensitiveOutput>,
+) -> Result<FreshnessReport> {
+    let trace_timings = std::env::var_os("CARGO_WARM_TIMINGS").is_some();
+    let started = Instant::now();
+    let same_repository =
+        git::same_repository(source_workspace, destination_workspace).unwrap_or(false);
+    if !same_repository {
+        return Ok(FreshnessReport {
+            same_repository,
+            path_sensitive_outputs,
+            ..FreshnessReport::default()
+        });
+    }
+    refresh_path_sensitive_outputs(
+        source_workspace,
+        destination_workspace,
+        &mut path_sensitive_outputs,
+    )?;
     let source_root = git::repo_root(source_workspace)?;
     let destination_root = git::repo_root(destination_workspace)?;
     let source_entries = git::tracked_index_entries(&source_root)?;
     let destination_entries = git::tracked_index_entries(&destination_root)?;
     let source_dirty = git::dirty_tracked_paths(&source_root)?;
     let destination_dirty = git::dirty_tracked_paths(&destination_root)?;
-    report.synced_files = 0;
+    let mut report = FreshnessReport {
+        same_repository,
+        path_sensitive_outputs,
+        ..FreshnessReport::default()
+    };
     count_entries(
         &source_root,
         &destination_root,
@@ -173,10 +190,160 @@ pub(crate) fn synchronize(
         &source_dirty,
         &destination_dirty,
         &mut report,
-        true,
-        true,
+        false,
+        false,
     )?;
+    freshness_timing(trace_timings, "Git candidates", started);
+    if !report.same_repository {
+        return Ok(report);
+    }
+
+    let started = Instant::now();
+    report.rebased_build_script_directives = rebase_build_script_outputs(
+        source_workspace,
+        destination_workspace,
+        build_pairs,
+        &report.path_sensitive_outputs,
+    )?;
+    freshness_timing(trace_timings, "rebase build-script outputs", started);
+    if report.blocking_outputs() > 0 {
+        // A cached build-script directive would still point at the source
+        // checkout (or at a destination path that does not exist). Do not make
+        // Cargo source files look fresh in that situation: forcing the build
+        // script to rerun is safer than allowing cross-worktree state leakage.
+        return Ok(report);
+    }
+
+    let started = Instant::now();
+    report.synced_watched_entries = synchronize_build_script_watched_paths(
+        source_workspace,
+        destination_workspace,
+        build_pairs,
+        package_roots,
+    )?;
+    freshness_timing(trace_timings, "sync watched build-script paths", started);
+
+    let started = Instant::now();
+    let (synced_files, different_files) = synchronize_entries_parallel(
+        &source_root,
+        &destination_root,
+        &source_entries,
+        &destination_entries,
+        &source_dirty,
+        &destination_dirty,
+    )?;
+    report.synced_files = synced_files;
+    report.different_files += different_files;
+    report.eligible_files = report.eligible_files.saturating_sub(different_files);
+    freshness_timing(trace_timings, "parallel byte proof + mtime sync", started);
     Ok(report)
+}
+
+fn freshness_timing(enabled: bool, label: &str, started: Instant) {
+    if enabled {
+        eprintln!(
+            "cargo-warm timing: freshness/{label}: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+}
+
+#[derive(Debug)]
+struct FreshnessCandidate {
+    source: PathBuf,
+    destination: PathBuf,
+    mtime: FileTime,
+    len: u64,
+}
+
+fn synchronize_entries_parallel(
+    source_root: &Path,
+    destination_root: &Path,
+    source_entries: &BTreeMap<PathBuf, String>,
+    destination_entries: &BTreeMap<PathBuf, String>,
+    source_dirty: &BTreeSet<PathBuf>,
+    destination_dirty: &BTreeSet<PathBuf>,
+) -> Result<(usize, usize)> {
+    let mut candidates = Vec::new();
+    for (relative, source_oid) in source_entries {
+        let Some(destination_oid) = destination_entries.get(relative) else {
+            continue;
+        };
+        if source_dirty.contains(relative)
+            || destination_dirty.contains(relative)
+            || source_oid != destination_oid
+        {
+            continue;
+        }
+        let source = source_root.join(relative);
+        let destination = destination_root.join(relative);
+        let (Ok(source_meta), Ok(destination_meta)) = (
+            fs::symlink_metadata(&source),
+            fs::symlink_metadata(&destination),
+        ) else {
+            continue;
+        };
+        if !source_meta.file_type().is_file() || !destination_meta.file_type().is_file() {
+            continue;
+        }
+        candidates.push(FreshnessCandidate {
+            source,
+            destination,
+            mtime: FileTime::from_last_modification_time(&source_meta),
+            len: source_meta.len(),
+        });
+    }
+
+    if candidates.is_empty() {
+        return Ok((0, 0));
+    }
+
+    // Large files dominate the proof cost. Sort them first, then distribute
+    // round-robin so one worker does not inherit every expensive comparison.
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.len));
+    let workers = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .clamp(1, 8)
+        .min(candidates.len());
+    let mut buckets: Vec<Vec<FreshnessCandidate>> = (0..workers).map(|_| Vec::new()).collect();
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        buckets[index % workers].push(candidate);
+    }
+
+    thread::scope(|scope| -> Result<(usize, usize)> {
+        let mut handles = Vec::with_capacity(workers);
+        for bucket in buckets {
+            handles.push(scope.spawn(move || -> Result<(usize, usize)> {
+                let mut synced = 0usize;
+                let mut different = 0usize;
+                for candidate in bucket {
+                    if !files_equal(&candidate.source, &candidate.destination)? {
+                        different += 1;
+                        continue;
+                    }
+                    set_file_mtime(&candidate.destination, candidate.mtime).with_context(|| {
+                        format!(
+                            "failed to mirror mtime for {}",
+                            candidate.destination.display()
+                        )
+                    })?;
+                    synced += 1;
+                }
+                Ok((synced, different))
+            }));
+        }
+        let mut total = 0usize;
+        let mut different = 0usize;
+        for handle in handles {
+            let (synced, worker_different) = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("freshness worker panicked"))??;
+            total += synced;
+            different += worker_different;
+        }
+        Ok((total, different))
+    })
 }
 
 pub(crate) fn materializable_link_search_paths(
@@ -184,16 +351,51 @@ pub(crate) fn materializable_link_search_paths(
     destination_workspace: &Path,
     source_build_dirs: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
+    Ok(
+        prepare_build_outputs(source_workspace, destination_workspace, source_build_dirs)?
+            .materializable_paths,
+    )
+}
+
+pub(crate) fn prepare_build_outputs(
+    source_workspace: &Path,
+    destination_workspace: &Path,
+    source_build_dirs: &[PathBuf],
+) -> Result<BuildOutputPlan> {
     let source_root = git::repo_root(source_workspace)?.canonicalize()?;
     let destination_root = git::repo_root(destination_workspace)?.canonicalize()?;
     let source_prefix = source_root.to_string_lossy();
+    let destination_prefix = destination_root.to_string_lossy();
     let mut paths = BTreeSet::new();
+    let mut found = Vec::new();
 
     for build_dir in source_build_dirs {
         visit_outputs(build_dir, 0, &mut |output| {
+            let Ok(metadata) = fs::metadata(output) else {
+                return;
+            };
+            if metadata.len() > 4 * 1024 * 1024 {
+                return;
+            }
             let Ok(text) = fs::read_to_string(output) else {
                 return;
             };
+
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if !is_path_sensitive_directive(trimmed, &source_prefix) {
+                    continue;
+                }
+                let (rebasable, reason) =
+                    classify_path_directive(trimmed, &source_prefix, &destination_prefix);
+                found.push(PathSensitiveOutput {
+                    output_file: output.to_path_buf(),
+                    command: trimmed.to_string(),
+                    rebasable,
+                    reason,
+                });
+            }
+
             let link_libs: Vec<_> = text.lines().filter_map(link_lib_name).collect();
             if link_libs.is_empty() {
                 return;
@@ -254,7 +456,12 @@ pub(crate) fn materializable_link_search_paths(
         })?;
     }
 
-    Ok(paths.into_iter().collect())
+    found.sort_by(|a, b| (&a.output_file, &a.command).cmp(&(&b.output_file, &b.command)));
+    found.dedup_by(|a, b| a.output_file == b.output_file && a.command == b.command);
+    Ok(BuildOutputPlan {
+        path_sensitive_outputs: found,
+        materializable_paths: paths.into_iter().collect(),
+    })
 }
 
 fn link_lib_name(line: &str) -> Option<String> {
@@ -373,6 +580,17 @@ fn scan_path_sensitive_outputs(
     destination_workspace: &Path,
     build_dirs: &[PathBuf],
 ) -> Result<Vec<PathSensitiveOutput>> {
+    Ok(
+        prepare_build_outputs(source_workspace, destination_workspace, build_dirs)?
+            .path_sensitive_outputs,
+    )
+}
+
+fn refresh_path_sensitive_outputs(
+    source_workspace: &Path,
+    destination_workspace: &Path,
+    outputs: &mut [PathSensitiveOutput],
+) -> Result<()> {
     let source = source_workspace
         .canonicalize()?
         .to_string_lossy()
@@ -381,36 +599,12 @@ fn scan_path_sensitive_outputs(
         .canonicalize()?
         .to_string_lossy()
         .into_owned();
-    let mut found = Vec::new();
-    for build_dir in build_dirs {
-        visit_outputs(build_dir, 0, &mut |output| {
-            let Ok(metadata) = fs::metadata(output) else {
-                return;
-            };
-            if metadata.len() > 4 * 1024 * 1024 {
-                return;
-            }
-            let Ok(text) = fs::read_to_string(output) else {
-                return;
-            };
-            for line in text.lines() {
-                let trimmed = line.trim();
-                if !is_path_sensitive_directive(trimmed, &source) {
-                    continue;
-                }
-                let (rebasable, reason) = classify_path_directive(trimmed, &source, &destination);
-                found.push(PathSensitiveOutput {
-                    output_file: output.to_path_buf(),
-                    command: trimmed.to_string(),
-                    rebasable,
-                    reason,
-                });
-            }
-        })?;
+    for output in outputs {
+        let (rebasable, reason) = classify_path_directive(&output.command, &source, &destination);
+        output.rebasable = rebasable;
+        output.reason = reason;
     }
-    found.sort_by(|a, b| (&a.output_file, &a.command).cmp(&(&b.output_file, &b.command)));
-    found.dedup_by(|a, b| a.output_file == b.output_file && a.command == b.command);
-    Ok(found)
+    Ok(())
 }
 
 fn is_path_sensitive_directive(line: &str, source: &str) -> bool {
@@ -471,50 +665,55 @@ fn rebase_build_script_outputs(
         .canonicalize()?
         .to_string_lossy()
         .into_owned();
-    let rebasable: BTreeSet<_> = outputs
-        .iter()
-        .filter(|output| output.rebasable)
-        .map(|output| (output.output_file.clone(), output.command.clone()))
-        .collect();
+    let mut rebasable: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    for output in outputs.iter().filter(|output| output.rebasable) {
+        rebasable
+            .entry(output.output_file.clone())
+            .or_default()
+            .insert(output.command.clone());
+    }
     if rebasable.is_empty() {
         return Ok(0);
     }
 
     let mut count = 0;
-    for (source_build, destination_build) in build_pairs {
-        visit_outputs(source_build, 0, &mut |source_output| {
-            let Ok(relative) = source_output.strip_prefix(source_build) else {
-                return;
-            };
-            let destination_output = destination_build.join(relative);
-            if !destination_output.is_file() {
-                return;
+    for (source_output, commands) in rebasable {
+        let Some((source_build, destination_build)) = build_pairs
+            .iter()
+            .find(|(source_build, _)| source_output.starts_with(source_build))
+        else {
+            continue;
+        };
+        let Ok(relative) = source_output.strip_prefix(source_build) else {
+            continue;
+        };
+        let destination_output = destination_build.join(relative);
+        if !destination_output.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&destination_output)?;
+        let mut changed = false;
+        let mut rewritten = String::with_capacity(text.len());
+        for chunk in text.split_inclusive('\n') {
+            let line = chunk.strip_suffix('\n').unwrap_or(chunk);
+            let newline = if chunk.ends_with('\n') { "\n" } else { "" };
+            if commands.contains(line.trim()) {
+                rewritten.push_str(&line.replace(&source, &destination));
+                changed = true;
+                count += 1;
+            } else {
+                rewritten.push_str(line);
             }
-            let Ok(text) = fs::read_to_string(&destination_output) else {
-                return;
-            };
-            let mut changed = false;
-            let mut rewritten = String::with_capacity(text.len());
-            for chunk in text.split_inclusive('\n') {
-                let line = chunk.strip_suffix('\n').unwrap_or(chunk);
-                let newline = if chunk.ends_with('\n') { "\n" } else { "" };
-                if rebasable.contains(&(source_output.to_path_buf(), line.trim().to_string())) {
-                    rewritten.push_str(&line.replace(&source, &destination));
-                    changed = true;
-                    count += 1;
-                } else {
-                    rewritten.push_str(line);
-                }
-                rewritten.push_str(newline);
-            }
-            if changed
-                && fs::write(&destination_output, rewritten).is_ok()
-                && let Ok(metadata) = fs::metadata(source_output)
-            {
-                let mtime = FileTime::from_last_modification_time(&metadata);
-                let _ = set_file_mtime(&destination_output, mtime);
-            }
-        })?;
+            rewritten.push_str(newline);
+        }
+        if changed {
+            fs::write(&destination_output, rewritten)?;
+            let metadata = fs::metadata(&source_output)?;
+            set_file_mtime(
+                &destination_output,
+                FileTime::from_last_modification_time(&metadata),
+            )?;
+        }
     }
     Ok(count)
 }
@@ -597,6 +796,17 @@ fn visit_fingerprint_json(
         let child = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // Cargo build-script fingerprints live under `.fingerprint`.
+            // Do not recursively walk the large artifact/data trees merely to
+            // discover those JSON files.
+            if matches!(
+                name.as_ref(),
+                "deps" | "incremental" | "build" | "examples" | "doc"
+            ) {
+                continue;
+            }
             visit_fingerprint_json(&child, depth + 1, visitor)?;
         } else if file_type.is_file()
             && entry

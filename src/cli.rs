@@ -2,7 +2,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::PrimeMode;
+use crate::config::{ClonePressure, PrimeMode};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -53,6 +53,15 @@ pub struct SeedArgs {
     /// Explicit project config path. Defaults to `.agents/.cargo-warm.toml` at the Git root when present.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// How aggressively to clone independent cache roots in parallel.
+    #[arg(long, value_enum)]
+    pub clone_pressure: Option<ClonePressure>,
+    /// Explicit concurrent cache-root clone count. Overrides clone pressure.
+    #[arg(long)]
+    pub clone_workers: Option<usize>,
+    /// Print phase timings for clone/freshness tuning.
+    #[arg(long)]
+    pub timings: bool,
     /// Warm checkout to seed from. Defaults to the nearest compatible worktree with usable cache state.
     #[arg(long = "from")]
     pub source: Option<PathBuf>,
@@ -95,6 +104,12 @@ pub struct DoctorArgs {
     /// Explicit project config path. Defaults to `.agents/.cargo-warm.toml` at the Git root when present.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// Clone pressure to evaluate instead of the project default.
+    #[arg(long, value_enum)]
+    pub clone_pressure: Option<ClonePressure>,
+    /// Explicit concurrent cache-root clone count to evaluate.
+    #[arg(long)]
+    pub clone_workers: Option<usize>,
     /// Warm checkout to compare against. Defaults to the nearest compatible worktree.
     #[arg(long = "from")]
     pub source: Option<PathBuf>,
@@ -143,6 +158,7 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Command};
+    use crate::config::ClonePressure;
 
     #[test]
     fn check_forwards_cargo_flags_without_separator() {
@@ -210,5 +226,22 @@ mod tests {
             args.config.as_deref(),
             Some(std::path::Path::new("config/cargo-warm.toml"))
         );
+    }
+
+    #[test]
+    fn seed_accepts_clone_pressure_and_worker_override() {
+        let cli = Cli::parse_from([
+            "cargo-warm",
+            "seed",
+            "--clone-pressure",
+            "fast",
+            "--clone-workers",
+            "3",
+        ]);
+        let Command::Seed(args) = cli.command else {
+            panic!("expected seed command");
+        };
+        assert_eq!(args.clone_pressure, Some(ClonePressure::Fast));
+        assert_eq!(args.clone_workers, Some(3));
     }
 }

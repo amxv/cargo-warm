@@ -36,6 +36,34 @@ Cargo-warm automatically reads `.agents/.cargo-warm.toml` from the Git root. Cre
 mkdir -p .agents
 ```
 
+## Clone pressure is a separate axis
+
+Profiles control **how much compiler validation** happens during provisioning. Clone pressure controls **how aggressively independent cache roots are copied at the same time**. They are intentionally orthogonal.
+
+```toml
+version = 1
+default-profile = "balanced"
+clone-pressure = "auto"
+manifests = ["Cargo.toml"]
+```
+
+| Clone pressure | Root concurrency |
+| --- | --- |
+| `auto` | Adapts to available CPUs and the number of seedable cache roots. This is the default. |
+| `gentle` | One cache root at a time. Lowest I/O pressure. |
+| `fast` | Up to four independent cache roots at once. |
+| `max` | Up to 2× logical CPUs, capped at 16 and by the number of roots. |
+
+For deterministic tuning, bypass the preset calculation:
+
+```toml
+clone-workers = 2
+```
+
+An explicit worker count overrides clone pressure. `cargo warm doctor` shows how many warm roots exist and how the selected setting resolves on the current machine.
+
+This knob does not change `quick`, `balanced`, or `deep`, and it does not weaken the cache safety model.
+
 ## Give Cargo a clean build-cache boundary
 
 Cargo-warm works with Cargo's default target directory, but Cargo 1.91+ can place intermediate compiler state in a separate `build-dir`. For worktree-heavy projects, a useful project or global Cargo configuration is:
@@ -50,6 +78,7 @@ This keeps final artifacts and intermediate cache state separate while still giv
 ```toml
 version = 1
 default-profile = "balanced"
+clone-pressure = "auto"
 manifests = ["Cargo.toml"]
 ```
 
@@ -58,6 +87,7 @@ A monorepo can list several Cargo workspaces once instead of repeating flags in 
 ```toml
 version = 1
 default-profile = "balanced"
+clone-pressure = "auto"
 manifests = [
   "desktop/Cargo.toml",
   "services/worker/Cargo.toml",
@@ -108,6 +138,8 @@ Command-line values override project config for that invocation:
 
 ```bash
 cargo warm seed --profile quick
+cargo warm seed --clone-pressure fast
+cargo warm seed --clone-workers 2
 cargo warm seed --prime-mode package
 cargo warm seed --include-target
 cargo warm seed --no-freshness-rebase
@@ -123,5 +155,7 @@ Do not pick the most expensive profile by default.
 2. Benchmark worktree creation separately from the first representative edit.
 3. Compare only the profiles the doctor suggests.
 4. Commit the profile that gives the best end-to-end developer/agent loop for the repository.
+
+Tune clone pressure independently. Use `cargo warm seed --timings` on fresh worktrees to compare the clone phase without conflating it with first-edit compiler latency.
 
 See [Doctor and benchmarking](/docs/doctor-and-benchmarking) for a repeatable method.

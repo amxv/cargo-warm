@@ -22,6 +22,7 @@ use crate::{
 struct DoctorReport {
     config_path: Option<PathBuf>,
     active_profile: config::SeedProfile,
+    clone: CloneReport,
     available_profiles: Vec<String>,
     recommendation: ProfileRecommendation,
     project: ProjectShape,
@@ -39,6 +40,15 @@ struct DoctorReport {
     freshness: freshness::FreshnessReport,
     auto_materializable_paths: Vec<PathBuf>,
     probes: Vec<ProbeReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct CloneReport {
+    pressure: config::ClonePressure,
+    configured_workers: Option<usize>,
+    effective_workers: usize,
+    warm_cache_roots: usize,
+    guidance: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,6 +130,8 @@ pub fn run(args: DoctorArgs) -> Result<()> {
             profile: args.profile.clone(),
             config: args.config.clone(),
             manifests: args.manifests.clone(),
+            clone_pressure: args.clone_pressure,
+            clone_workers: args.clone_workers,
             ..SeedOverrides::default()
         },
     )?;
@@ -191,6 +203,9 @@ pub fn run(args: DoctorArgs) -> Result<()> {
             "source and destination resolved different manifest counts"
         ));
     }
+    let warm_cache_roots =
+        cache::seedable_state_count(&source_paths, effective.profile.include_target);
+    let clone = clone_report(&effective, warm_cache_roots);
     let source_build_dirs: Vec<_> = source_paths
         .iter()
         .filter_map(|paths| paths.build_directory.clone())
@@ -271,6 +286,7 @@ pub fn run(args: DoctorArgs) -> Result<()> {
     let report = DoctorReport {
         config_path: effective.config_path.clone(),
         active_profile: effective.profile.clone(),
+        clone,
         available_profiles,
         recommendation,
         project,
@@ -296,6 +312,47 @@ pub fn run(args: DoctorArgs) -> Result<()> {
         print_human_report(&report, args.probe);
     }
     Ok(())
+}
+
+fn clone_report(effective: &EffectiveSeedConfig, warm_cache_roots: usize) -> CloneReport {
+    let effective_workers = effective.clone.effective_workers(warm_cache_roots);
+    let guidance = if warm_cache_roots == 0 {
+        "no warm cache roots are currently available; clone pressure will matter once a source cache exists"
+            .to_string()
+    } else if warm_cache_roots == 1 {
+        "one cache root is seedable, so root-level clone concurrency cannot reduce this seed further"
+            .to_string()
+    } else if effective.clone.workers.is_some() {
+        format!(
+            "the explicit worker count caps {} independent warm cache root(s) at {effective_workers} concurrent clone(s)",
+            warm_cache_roots
+        )
+    } else {
+        let auto_workers = config::CloneSettings::default().effective_workers(warm_cache_roots);
+        if effective.clone.pressure == config::ClonePressure::Auto {
+            if auto_workers >= warm_cache_roots {
+                format!(
+                    "auto already clones all {warm_cache_roots} warm cache root(s) concurrently on this machine; higher pressure cannot add root-level parallelism"
+                )
+            } else {
+                format!(
+                    "auto uses {auto_workers} concurrent clone(s) for {warm_cache_roots} warm roots; benchmark `fast` if worktree creation latency matters more than I/O pressure"
+                )
+            }
+        } else {
+            format!(
+                "{} resolves to {effective_workers} concurrent clone(s) for {warm_cache_roots} warm cache root(s) on this machine",
+                effective.clone.pressure
+            )
+        }
+    };
+    CloneReport {
+        pressure: effective.clone.pressure,
+        configured_workers: effective.clone.workers,
+        effective_workers,
+        warm_cache_roots,
+        guidance,
+    }
 }
 
 fn recommend_profile(
@@ -459,8 +516,9 @@ fn recommended_config_example(
         .map(|path| format!("\"{}\"", path.display()))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut text =
-        format!("version = 1\ndefault-profile = \"{profile}\"\nmanifests = [{manifests}]\n");
+    let mut text = format!(
+        "version = 1\ndefault-profile = \"{profile}\"\nclone-pressure = \"auto\"\nmanifests = [{manifests}]\n"
+    );
     if profile != "quick"
         && matches!(
             project.rustc.channel,
@@ -720,6 +778,18 @@ fn print_human_report(report: &DoctorReport, probed: bool) {
         }
     );
     println!("  profiles:    {}", report.available_profiles.join(", "));
+    println!(
+        "  clone:       {} -> {} worker(s) for {} warm cache root(s){}",
+        report.clone.pressure,
+        report.clone.effective_workers,
+        report.clone.warm_cache_roots,
+        report
+            .clone
+            .configured_workers
+            .map(|workers| format!(" (explicit workers={workers})"))
+            .unwrap_or_default()
+    );
+    println!("  clone note:  {}", report.clone.guidance);
     if report.comparison_available {
         println!(
             "  source:      {} ({})",

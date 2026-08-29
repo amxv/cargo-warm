@@ -2,11 +2,12 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use filetime::{FileTime, set_file_times};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -72,8 +73,7 @@ pub(crate) fn seed_one(
     destination_workspace: &Path,
     manifest: &Path,
     strategy: CloneStrategy,
-    registry: &mut Registry,
-) -> Result<bool> {
+) -> Result<Option<SeedRecord>> {
     if source_path == destination_path {
         bail!(
             "refusing shared mutable {:?} directory: {}",
@@ -87,7 +87,7 @@ pub(crate) fn seed_one(
             kind,
             source_path.display()
         );
-        return Ok(false);
+        return Ok(None);
     }
     if destination_path.exists() {
         println!(
@@ -95,7 +95,7 @@ pub(crate) fn seed_one(
             kind,
             destination_path.display()
         );
-        return Ok(false);
+        return Ok(None);
     }
 
     let parent = destination_path
@@ -127,17 +127,14 @@ pub(crate) fn seed_one(
     let elapsed = started.elapsed();
     let free_after_kb = filesystem_free_kb(parent).ok();
 
-    registry
-        .records
-        .retain(|record| record.path != destination_path);
-    registry.records.push(SeedRecord {
+    let record = SeedRecord {
         workspace: destination_workspace.to_path_buf(),
         source_workspace: source_workspace.to_path_buf(),
         manifest: manifest.to_path_buf(),
         kind,
         path: destination_path.to_path_buf(),
         created_unix_seconds: now_unix_seconds(),
-    });
+    };
 
     let physical_growth = match (free_before_kb, free_after_kb) {
         (Some(before), Some(after)) => {
@@ -154,7 +151,7 @@ pub(crate) fn seed_one(
         elapsed.as_secs_f64(),
         physical_growth
     );
-    Ok(true)
+    Ok(Some(record))
 }
 
 fn filesystem_free_kb(path: &Path) -> Result<u64> {
@@ -414,12 +411,12 @@ pub(crate) fn clone_directory(
     destination: &Path,
     strategy: CloneStrategy,
 ) -> Result<()> {
+    if matches!(strategy, CloneStrategy::MacClone) {
+        return clone_directory_macos(source, destination);
+    }
+
     let status = match strategy {
-        CloneStrategy::MacClone => Command::new("cp")
-            .args(["-cR"])
-            .arg(source)
-            .arg(destination)
-            .status()?,
+        CloneStrategy::MacClone => unreachable!("handled above"),
         CloneStrategy::LinuxReflink => Command::new("cp")
             .args(["-a", "--reflink=always"])
             .arg(source)
@@ -435,6 +432,140 @@ pub(crate) fn clone_directory(
         bail!("copy command exited with {status}");
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct MacCloneJob {
+    source: PathBuf,
+    destination_parent: PathBuf,
+}
+
+#[derive(Debug)]
+struct DirectoryMetadata {
+    destination: PathBuf,
+    permissions: fs::Permissions,
+    atime: FileTime,
+    mtime: FileTime,
+}
+
+fn clone_directory_macos(source: &Path, destination: &Path) -> Result<()> {
+    match reflink_copy::reflink(source, destination) {
+        Ok(()) => return Ok(()),
+        Err(error) => {
+            // `clonefile(2)` is dramatically faster for large APFS directory
+            // trees, but Apple documents recursive directory cloning as a
+            // discouraged API surface. Keep the battle-tested per-subtree
+            // `cp -c` implementation as a correctness fallback for unusual
+            // files, volumes, or future macOS behavior.
+            if destination.exists() {
+                fs::remove_dir_all(destination).with_context(|| {
+                    format!(
+                        "failed to clean partial clonefile destination {}",
+                        destination.display()
+                    )
+                })?;
+            }
+            eprintln!(
+                "cargo-warm: native APFS directory clone unavailable for {}; falling back to parallel clone: {error}",
+                source.display()
+            );
+        }
+    }
+
+    clone_directory_macos_parallel(source, destination)
+}
+
+fn clone_directory_macos_parallel(source: &Path, destination: &Path) -> Result<()> {
+    let source_metadata = fs::metadata(source)
+        .with_context(|| format!("failed to inspect clone source {}", source.display()))?;
+    fs::create_dir(destination).with_context(|| {
+        format!(
+            "failed to create clone destination {}",
+            destination.display()
+        )
+    })?;
+
+    let mut directory_metadata = vec![saved_directory_metadata(destination, &source_metadata)];
+    let mut jobs = Vec::new();
+
+    // Cargo build roots are usually one or more profile directories (`debug`,
+    // `release`, …), each containing independent metadata-heavy subtrees such
+    // as `deps`, `.fingerprint`, `build`, and `incremental`. A single
+    // recursive `cp -cR` walks all of them on one process. Split only this
+    // first directory level so APFS can clone those independent subtrees in
+    // parallel while each subtree still uses the native COW primitive.
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        if file_type.is_dir() && !file_type.is_symlink() {
+            let destination_dir = destination.join(entry.file_name());
+            let metadata = fs::metadata(&source_path)?;
+            fs::create_dir(&destination_dir)?;
+            directory_metadata.push(saved_directory_metadata(&destination_dir, &metadata));
+
+            for child in fs::read_dir(&source_path)? {
+                jobs.push(MacCloneJob {
+                    source: child?.path(),
+                    destination_parent: destination_dir.clone(),
+                });
+            }
+        } else {
+            jobs.push(MacCloneJob {
+                source: source_path,
+                destination_parent: destination.to_path_buf(),
+            });
+        }
+    }
+
+    let parallelism = std::thread::available_parallelism()
+        // APFS clone workers are metadata/I/O bound, not CPU bound. A modest
+        // oversubscription keeps a slow `deps` or `.fingerprint` walk from
+        // leaving the rest of the filesystem idle.
+        .map(|value| value.get().saturating_mul(2))
+        .unwrap_or(4)
+        .clamp(1, 16);
+    for chunk in jobs.chunks(parallelism) {
+        let mut children: Vec<(Child, &MacCloneJob)> = Vec::with_capacity(chunk.len());
+        for job in chunk {
+            let child = Command::new("cp")
+                .args(["-cRp"])
+                .arg(&job.source)
+                .arg(&job.destination_parent)
+                .spawn()
+                .with_context(|| {
+                    format!("failed to start APFS clone for {}", job.source.display())
+                })?;
+            children.push((child, job));
+        }
+        for (mut child, job) in children {
+            let status = child.wait()?;
+            if !status.success() {
+                bail!(
+                    "APFS clone failed for {} with {status}",
+                    job.source.display()
+                );
+            }
+        }
+    }
+
+    // Copying children updates the parent mtimes. Restore the exact source
+    // metadata after all clones finish so the copy operation itself cannot
+    // become a Cargo freshness input.
+    for metadata in directory_metadata.into_iter().rev() {
+        fs::set_permissions(&metadata.destination, metadata.permissions)?;
+        set_file_times(&metadata.destination, metadata.atime, metadata.mtime)?;
+    }
+    Ok(())
+}
+
+fn saved_directory_metadata(destination: &Path, source: &fs::Metadata) -> DirectoryMetadata {
+    DirectoryMetadata {
+        destination: destination.to_path_buf(),
+        permissions: source.permissions(),
+        atime: FileTime::from_last_access_time(source),
+        mtime: FileTime::from_last_modification_time(source),
+    }
 }
 
 pub(crate) fn seed_workspace_path(
@@ -594,4 +725,53 @@ fn now_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_clone_tests {
+    use std::fs;
+
+    use filetime::{FileTime, set_file_times};
+
+    use super::{CloneStrategy, clone_directory};
+
+    #[test]
+    fn native_apfs_clone_preserves_artifact_metadata_and_contents() {
+        let root =
+            std::env::temp_dir().join(format!("cargo-warm-mac-clone-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let destination = root.join("destination");
+        for directory in ["debug/deps", "debug/.fingerprint", "debug/incremental"] {
+            fs::create_dir_all(source.join(directory)).unwrap();
+        }
+        fs::write(source.join("CACHEDIR.TAG"), "cache\n").unwrap();
+        fs::write(source.join("debug/deps/libfixture.rmeta"), "metadata\n").unwrap();
+        fs::write(source.join("debug/.fingerprint/fixture"), "fingerprint\n").unwrap();
+        fs::write(source.join("debug/incremental/state"), "incremental\n").unwrap();
+
+        let root_time = FileTime::from_unix_time(1_700_000_000, 123);
+        let artifact_time = FileTime::from_unix_time(1_700_000_100, 456);
+        set_file_times(&source, root_time, root_time).unwrap();
+        set_file_times(
+            source.join("debug/deps/libfixture.rmeta"),
+            artifact_time,
+            artifact_time,
+        )
+        .unwrap();
+
+        clone_directory(&source, &destination, CloneStrategy::MacClone).unwrap();
+
+        assert_eq!(
+            fs::read(destination.join("debug/deps/libfixture.rmeta")).unwrap(),
+            b"metadata\n"
+        );
+        assert_eq!(
+            FileTime::from_last_modification_time(
+                &fs::metadata(destination.join("debug/deps/libfixture.rmeta")).unwrap()
+            ),
+            artifact_time
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 }

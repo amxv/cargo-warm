@@ -38,6 +38,7 @@ For example:
 ```toml
 version = 1
 default-profile = "balanced"
+clone-pressure = "auto"
 manifests = ["Cargo.toml"]
 unstable-bootstrap = true
 ```
@@ -49,6 +50,7 @@ For a repository with several independent Cargo workspaces:
 ```toml
 version = 1
 default-profile = "balanced"
+clone-pressure = "auto"
 manifests = [
   "app/Cargo.toml",
   "tools/Cargo.toml",

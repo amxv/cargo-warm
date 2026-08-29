@@ -22,6 +22,7 @@ With one checkout, the doctor runs in project-only mode. It reports:
 - local Rust source size;
 - direct and path-dependency build scripts;
 - current Cargo cache shape;
+- clone pressure, seedable cache-root count, and effective clone workers;
 - whether Cargo has a separate intermediate `build-dir` or still mixes build cache and final target artifacts;
 - a recommended profile and alternatives worth testing.
 
@@ -71,6 +72,22 @@ Probe mode runs `cargo check` with Cargo fingerprint logging enabled and groups 
 
 Because it can compile code, use `--probe` after the cheap diagnosis points you at a real question.
 
+## Tune worktree clone time separately
+
+Compiler profiles and clone pressure answer different questions. Keep the compiler profile fixed while measuring clone settings:
+
+```bash
+cargo warm seed --profile quick --clone-pressure gentle --timings
+cargo warm seed --profile quick --clone-pressure auto --timings
+cargo warm seed --profile quick --clone-pressure fast --timings
+```
+
+`--timings` prints the source/manifest preflight, cache clone + freshness planning, native-state handling, freshness synchronization, optional prime, and total seed time.
+
+Always use a fresh destination worktree for each sample. Clone-on-write filesystem caches are noisy, so compare several samples or medians rather than one run.
+
+If the doctor reports only one seedable cache root, clone pressure cannot create root-level parallelism. If it reports several, `auto` is the starting point; an explicit `clone-workers = N` is useful when you have measured a stable project/machine-specific sweet spot.
+
 ## Benchmark profiles correctly
 
 Use a fresh worktree for each sample. Reusing one destination lets the first run warm the second and makes the comparison meaningless.
@@ -101,6 +118,7 @@ Typical choices:
 - `quick` vs `balanced` when the project is medium/large but has no important direct build script.
 - `balanced` vs `deep` when a very large direct package has a build script and the first edit remains slower than the warm source checkout.
 - cache cleanup vs no cleanup when the doctor reports an unusually large stale `deps/` population.
+- `auto` vs `fast` clone pressure when several independent Cargo cache roots exist and worktree creation latency is important.
 
 `deep` deliberately makes the selected package's own build script stale during provisioning. If that build script drives an expensive native toolchain, include that cost in the benchmark instead of hiding it.
 
