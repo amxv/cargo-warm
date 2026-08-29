@@ -11,7 +11,7 @@ summary: The shortest path from template clone to product code.
 ```bash
 gh repo create acme/pluck \
   --public \
-  --template amxv/rust-cli-template \
+  --template amxv/cargo-warm \
   --clone
 cd pluck
 ```

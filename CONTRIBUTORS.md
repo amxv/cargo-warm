@@ -14,7 +14,7 @@
 just check-fast
 just check
 just build
-./target/debug/mycli --help
+./target/debug/cargo-warm --help
 ```
 
 The full Rust check is deliberately conventional: format check, strict Clippy, then tests.

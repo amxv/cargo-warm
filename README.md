@@ -1,4 +1,4 @@
-# rust-cli-template
+# cargo-warm
 
 A Rust-first template for shipping command-line tools without rebuilding the same OSS plumbing every time.
 
@@ -21,7 +21,7 @@ Create the repository from this GitHub template:
 ```bash
 gh repo create acme/pluck \
   --public \
-  --template amxv/rust-cli-template \
+  --template amxv/cargo-warm \
   --clone
 cd pluck
 ```

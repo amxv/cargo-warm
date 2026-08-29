@@ -4,11 +4,8 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.32.0"
 ci = ["github"]
-installers = ["shell", "powershell", "npm"]
-publish-jobs = ["npm"]
+installers = ["shell", "powershell"]
 install-path = "CARGO_HOME"
-npm-scope = "@amxv"
-npm-package = "rust-cli-template"
 github-attestations = true
 targets = [
   "aarch64-apple-darwin",

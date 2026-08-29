@@ -3,6 +3,6 @@ import zuedocs from "zuedocs/astro";
 
 export default defineConfig({
   output: "static",
-  site: "https://github.com/amxv/rust-cli-template",
+  site: "https://github.com/amxv/cargo-warm",
   integrations: [zuedocs()]
 });

@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_mycli"))
+    Command::new(env!("CARGO_BIN_EXE_cargo-warm"))
 }
 
 #[test]

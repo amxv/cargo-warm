@@ -9,10 +9,10 @@ summary: Cargo, Just, docs, bootstrap, and distribution commands in one place.
 ## Starter CLI
 
 ```bash
-mycli --help
-mycli --version
-mycli hello
-mycli hello agent
+cargo-warm --help
+cargo-warm --version
+cargo-warm hello
+cargo-warm hello agent
 ```
 
 ## Rust development

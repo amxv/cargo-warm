@@ -1,14 +1,14 @@
 export const siteConfig = {
-  name: "mycli",
+  name: "cargo-warm",
   strapline: "A Rust CLI ready to ship",
   description:
-    "Documentation for mycli, a Rust command-line starter with tests, dist-powered releases, npm installation, and an isolated docs site.",
-  repoUrl: "https://github.com/amxv/rust-cli-template",
+    "Documentation for cargo-warm, a Rust command-line starter with tests, dist-powered releases, npm installation, and an isolated docs site.",
+  repoUrl: "https://github.com/amxv/cargo-warm",
   accentColor: "#b7410e",
   accentColorDark: "#f28c52",
   footerSections: [
     {
-      title: "mycli",
+      title: "cargo-warm",
       text: "A Rust CLI with build, release, installer, and documentation plumbing ready from the first commit."
     },
     {
@@ -18,8 +18,8 @@ export const siteConfig = {
     {
       title: "Repository",
       linkPrefix: "Source: ",
-      linkHref: "https://github.com/amxv/rust-cli-template",
-      linkLabel: "github.com/amxv/rust-cli-template"
+      linkHref: "https://github.com/amxv/cargo-warm",
+      linkLabel: "github.com/amxv/cargo-warm"
     }
   ]
 } as const;

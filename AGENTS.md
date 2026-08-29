@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for coding agents working in projects created from `rust-cli-template`.
+Guidance for coding agents working in projects created from `cargo-warm`.
 
 ## Purpose
 
