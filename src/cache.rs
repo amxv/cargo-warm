@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -15,6 +16,8 @@ pub(crate) struct CargoPaths {
     pub(crate) manifest: PathBuf,
     pub(crate) build_directory: Option<PathBuf>,
     pub(crate) target_directory: PathBuf,
+    #[serde(skip_serializing)]
+    pub(crate) package_roots: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,35 +50,17 @@ pub(crate) enum CloneStrategy {
     PhysicalCopy,
 }
 
-pub(crate) fn find_main_worktree(destination: &Path) -> Result<Option<PathBuf>> {
-    let output = Command::new("git")
-        .current_dir(destination)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-        .with_context(|| "failed to inspect Git worktrees")?;
-    if !output.status.success() {
-        return Ok(None);
-    }
+pub(crate) struct LockfileGuard {
+    path: PathBuf,
+    existed: bool,
+}
 
-    let mut current_worktree: Option<PathBuf> = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            current_worktree = Some(PathBuf::from(path));
-            continue;
-        }
-        if line == "branch refs/heads/main"
-            && let Some(worktree) = current_worktree.take()
-        {
-            let canonical = canonical_dir(&worktree)?;
-            if canonical != destination {
-                return Ok(Some(canonical));
-            }
-        }
-        if line.is_empty() {
-            current_worktree = None;
+impl Drop for LockfileGuard {
+    fn drop(&mut self) {
+        if !self.existed {
+            let _ = fs::remove_file(&self.path);
         }
     }
-    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -207,6 +192,38 @@ fn cargo_paths(workspace: &Path, manifest: &Path) -> Result<CargoPaths> {
     if !manifest.is_file() {
         bail!("manifest does not exist: {}", manifest.display());
     }
+    let metadata = cargo_metadata_value(workspace, &manifest)?;
+    let workspace_root = json_path(&metadata, "workspace_root")?;
+    let target_directory = json_path(&metadata, "target_directory")?;
+    let build_directory = metadata
+        .get("build_directory")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
+    let mut package_roots = BTreeMap::new();
+    if let Some(packages) = metadata.get("packages").and_then(Value::as_array) {
+        for package in packages {
+            let (Some(name), Some(manifest_path)) = (
+                package.get("name").and_then(Value::as_str),
+                package.get("manifest_path").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            if let Some(root) = Path::new(manifest_path).parent() {
+                package_roots.insert(name.to_string(), root.to_path_buf());
+            }
+        }
+    }
+    Ok(CargoPaths {
+        workspace: PathBuf::from(workspace_root),
+        manifest,
+        build_directory,
+        target_directory: PathBuf::from(target_directory),
+        package_roots,
+    })
+}
+
+pub(crate) fn cargo_metadata_value(workspace: &Path, manifest: &Path) -> Result<Value> {
+    let _lock_guard = lockfile_guard(workspace, manifest)?;
     let output = command_output(
         Command::new("cargo")
             .current_dir(workspace)
@@ -217,37 +234,69 @@ fn cargo_paths(workspace: &Path, manifest: &Path) -> Result<CargoPaths> {
                 "--no-deps",
                 "--manifest-path",
             ])
-            .arg(&manifest),
+            .arg(manifest),
     )?;
-    let metadata: Value = serde_json::from_slice(&output)?;
-    let workspace_root = json_path(&metadata, "workspace_root")?;
-    let target_directory = json_path(&metadata, "target_directory")?;
-    let build_directory = metadata
-        .get("build_directory")
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    Ok(CargoPaths {
-        workspace: PathBuf::from(workspace_root),
-        manifest,
-        build_directory,
-        target_directory: PathBuf::from(target_directory),
+    Ok(serde_json::from_slice(&output)?)
+}
+
+pub(crate) fn lockfile_guard(workspace: &Path, manifest: &Path) -> Result<LockfileGuard> {
+    let output = command_output(
+        Command::new("cargo")
+            .current_dir(workspace)
+            .args([
+                "locate-project",
+                "--workspace",
+                "--message-format",
+                "plain",
+                "--manifest-path",
+            ])
+            .arg(manifest),
+    )?;
+    let workspace_manifest = PathBuf::from(String::from_utf8(output)?.trim());
+    let root = workspace_manifest.parent().ok_or_else(|| {
+        anyhow!(
+            "workspace manifest has no parent: {}",
+            workspace_manifest.display()
+        )
+    })?;
+    let path = root.join("Cargo.lock");
+    Ok(LockfileGuard {
+        existed: path.exists(),
+        path,
     })
 }
 
 pub(crate) fn assert_compatible_toolchains(source: &Path, destination: &Path) -> Result<()> {
+    if !toolchains_compatible(source, destination)? {
+        bail!("Cargo/rustc differ between source and destination; refusing incompatible seed");
+    }
+    Ok(())
+}
+
+pub(crate) fn toolchains_compatible(source: &Path, destination: &Path) -> Result<bool> {
     for tool in ["cargo", "rustc"] {
         let args: &[&str] = if tool == "rustc" { &["-vV"] } else { &["-V"] };
         let source_id = command_output(Command::new(tool).current_dir(source).args(args))?;
         let destination_id =
             command_output(Command::new(tool).current_dir(destination).args(args))?;
         if source_id != destination_id {
-            bail!("{tool} differs between source and destination; refusing incompatible seed");
+            return Ok(false);
         }
+    }
+    Ok(true)
+}
+
+pub(crate) fn assert_workspace_quiescent(workspace: &Path) -> Result<()> {
+    if !workspace_quiescent(workspace)? {
+        bail!(
+            "Cargo or rustc is active in {}; seed only from a quiescent workspace",
+            workspace.display()
+        );
     }
     Ok(())
 }
 
-pub(crate) fn assert_workspace_quiescent(workspace: &Path) -> Result<()> {
+pub(crate) fn workspace_quiescent(workspace: &Path) -> Result<bool> {
     for process_name in ["cargo", "rustc"] {
         let output = Command::new("pgrep")
             .args(["-x", process_name])
@@ -264,14 +313,30 @@ pub(crate) fn assert_workspace_quiescent(workspace: &Path) -> Result<()> {
             if let Some(cwd) = process_cwd(pid.trim())?
                 && cwd.starts_with(workspace)
             {
-                bail!(
-                    "{process_name} is active in {}; seed only from a quiescent workspace",
-                    workspace.display()
-                );
+                return Ok(false);
             }
         }
     }
-    Ok(())
+    Ok(true)
+}
+
+pub(crate) fn seedable_state_count(paths: &[CargoPaths], include_target: bool) -> usize {
+    paths
+        .iter()
+        .map(|paths| {
+            let build = usize::from(
+                paths
+                    .build_directory
+                    .as_ref()
+                    .is_some_and(|path| path.is_dir()),
+            );
+            let target = usize::from(
+                (include_target || paths.build_directory.is_none())
+                    && paths.target_directory.is_dir(),
+            );
+            build + target
+        })
+        .sum()
 }
 
 fn process_cwd(pid: &str) -> Result<Option<PathBuf>> {
@@ -321,7 +386,11 @@ pub(crate) fn clone_strategy(copy_fallback: bool) -> Result<CloneStrategy> {
     )
 }
 
-fn clone_directory(source: &Path, destination: &Path, strategy: CloneStrategy) -> Result<()> {
+pub(crate) fn clone_directory(
+    source: &Path,
+    destination: &Path,
+    strategy: CloneStrategy,
+) -> Result<()> {
     let status = match strategy {
         CloneStrategy::MacClone => Command::new("cp")
             .args(["-cR"])
@@ -343,6 +412,99 @@ fn clone_directory(source: &Path, destination: &Path, strategy: CloneStrategy) -
         bail!("copy command exited with {status}");
     }
     Ok(())
+}
+
+pub(crate) fn seed_workspace_path(
+    source_workspace: &Path,
+    destination_workspace: &Path,
+    relative: &Path,
+    strategy: CloneStrategy,
+) -> Result<bool> {
+    use std::path::Component;
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!(
+            "--seed-path must be workspace-relative without '..': {}",
+            relative.display()
+        );
+    }
+    let source = source_workspace.join(relative);
+    let destination = destination_workspace.join(relative);
+    let source_metadata = match fs::symlink_metadata(&source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "cargo-warm: extra source does not exist, skipping {}",
+                source.display()
+            );
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if destination.exists() {
+        println!(
+            "cargo-warm: extra destination already exists, leaving untouched: {}",
+            destination.display()
+        );
+        return Ok(false);
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| anyhow!("extra cache path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".cargo-warm-extra-{}", std::process::id()));
+    if temp.exists() {
+        if temp.is_dir() {
+            fs::remove_dir_all(&temp)?;
+        } else {
+            fs::remove_file(&temp)?;
+        }
+    }
+    if source_metadata.file_type().is_symlink() {
+        let target = fs::read_link(&source)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, &temp)?;
+        #[cfg(windows)]
+        {
+            if source.is_dir() {
+                std::os::windows::fs::symlink_dir(target, &temp)?;
+            } else {
+                std::os::windows::fs::symlink_file(target, &temp)?;
+            }
+        }
+    } else if source_metadata.is_dir() {
+        clone_directory(&source, &temp, strategy)?;
+    } else {
+        let status = match strategy {
+            CloneStrategy::MacClone => Command::new("cp")
+                .arg("-c")
+                .arg(&source)
+                .arg(&temp)
+                .status()?,
+            CloneStrategy::LinuxReflink => Command::new("cp")
+                .args(["--reflink=always", "-p"])
+                .arg(&source)
+                .arg(&temp)
+                .status()?,
+            CloneStrategy::PhysicalCopy => Command::new("cp")
+                .arg("-p")
+                .arg(&source)
+                .arg(&temp)
+                .status()?,
+        };
+        if !status.success() {
+            bail!("copy command exited with {status}");
+        }
+    }
+    fs::rename(&temp, &destination)?;
+    println!("cargo-warm: seeded extra path {}", relative.display());
+    Ok(true)
 }
 
 fn command_output(command: &mut Command) -> Result<Vec<u8>> {
@@ -409,67 +571,4 @@ fn now_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{fs, process::Command};
-
-    #[test]
-    fn main_worktree_is_discovered_from_feature_worktree() {
-        let root =
-            std::env::temp_dir().join(format!("cargo-warm-worktree-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        let repo = root.join("repo");
-        let feature = root.join("feature");
-        fs::create_dir_all(&repo).unwrap();
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["init", "-b", "main"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["config", "user.email", "cargo-warm@example.invalid"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["config", "user.name", "cargo-warm test"])
-            .status()
-            .unwrap();
-        fs::write(repo.join("README"), "seed").unwrap();
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["add", "README"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .current_dir(&repo)
-            .args(["commit", "-m", "seed"])
-            .status()
-            .unwrap();
-        Command::new("git")
-            .current_dir(&repo)
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                "feature",
-                feature.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap();
-
-        let discovered = super::find_main_worktree(&feature).unwrap().unwrap();
-        assert_eq!(discovered, repo.canonicalize().unwrap());
-
-        let _ = Command::new("git")
-            .current_dir(&repo)
-            .args(["worktree", "remove", "--force", feature.to_str().unwrap()])
-            .status();
-        let _ = fs::remove_dir_all(&root);
-    }
 }

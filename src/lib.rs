@@ -1,6 +1,11 @@
 pub mod cache;
 pub mod cli;
 pub mod commands;
+pub mod compiler;
+pub(crate) mod freshness;
+pub(crate) mod git;
+pub(crate) mod prime;
+pub mod rustc_wrapper;
 
 use anyhow::Result;
 use clap::Parser;
@@ -16,6 +21,7 @@ fn run_with_args(args: Vec<String>) -> Result<()> {
         Command::Path(args) => commands::path::run(args),
         Command::Seed(args) => commands::seed::run(args),
         Command::Doctor(args) => commands::doctor::run(args),
+        Command::Check(args) => commands::check::run(args),
         Command::Status => commands::status::run(),
         Command::Gc(args) => commands::gc::run(args),
     }

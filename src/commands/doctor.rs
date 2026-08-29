@@ -10,12 +10,13 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{cache, cli::DoctorArgs};
+use crate::{cache, cli::DoctorArgs, freshness, git};
 
 #[derive(Debug, Serialize)]
 struct DoctorReport {
     source: PathBuf,
     destination: PathBuf,
+    source_reason: String,
     source_head: Option<String>,
     destination_head: Option<String>,
     same_revision: bool,
@@ -23,6 +24,8 @@ struct DoctorReport {
     destination_clean: bool,
     tracked_mtimes: Option<TrackedMtimeSummary>,
     manifests: Vec<ManifestReport>,
+    freshness: freshness::FreshnessReport,
+    auto_materializable_paths: Vec<PathBuf>,
     probes: Vec<ProbeReport>,
 }
 
@@ -80,11 +83,17 @@ enum FingerprintCategory {
 
 pub fn run(args: DoctorArgs) -> Result<()> {
     let destination = cache::canonical_dir(&args.destination)?;
-    let source = match args.source {
-        Some(source) => cache::canonical_dir(&source)?,
-        None => cache::find_main_worktree(&destination)?.ok_or_else(|| {
-            anyhow!("could not find a separate Git worktree on branch main; pass --from explicitly")
-        })?,
+    let (source, source_reason) = match args.source {
+        Some(source) => (
+            cache::canonical_dir(&source)?,
+            "explicit --from".to_string(),
+        ),
+        None => {
+            let selection = git::best_source_worktree(&destination)?.ok_or_else(|| {
+                anyhow!("could not find a compatible Git worktree; pass --from explicitly")
+            })?;
+            (selection.path, selection.reason)
+        }
     };
 
     let source_head = git_head(&source)?;
@@ -106,6 +115,13 @@ pub fn run(args: DoctorArgs) -> Result<()> {
             "source and destination resolved different manifest counts"
         ));
     }
+    let source_build_dirs: Vec<_> = source_paths
+        .iter()
+        .filter_map(|paths| paths.build_directory.clone())
+        .collect();
+    let freshness = freshness::analyze(&source, &destination, &source_build_dirs)?;
+    let auto_materializable_paths =
+        freshness::materializable_link_search_paths(&source, &destination, &source_build_dirs)?;
 
     let mut manifests = Vec::with_capacity(destination_paths.len());
     for (source_paths, destination_paths) in source_paths.iter().zip(&destination_paths) {
@@ -139,6 +155,7 @@ pub fn run(args: DoctorArgs) -> Result<()> {
     let report = DoctorReport {
         source,
         destination,
+        source_reason,
         source_head,
         destination_head,
         same_revision,
@@ -146,6 +163,8 @@ pub fn run(args: DoctorArgs) -> Result<()> {
         destination_clean,
         tracked_mtimes,
         manifests,
+        freshness,
+        auto_materializable_paths,
         probes,
     };
 
@@ -362,7 +381,11 @@ fn extract_package(line: &str) -> Option<String> {
 
 fn print_human_report(report: &DoctorReport, probed: bool) {
     println!("cargo-warm doctor");
-    println!("  source:      {}", report.source.display());
+    println!(
+        "  source:      {} ({})",
+        report.source.display(),
+        report.source_reason
+    );
     println!("  destination: {}", report.destination.display());
     println!(
         "  revision:    {}",
@@ -390,6 +413,46 @@ fn print_human_report(report: &DoctorReport, probed: bool) {
         }
     } else {
         println!("  mtimes:      skipped (requires clean worktrees at the same revision)");
+    }
+
+    println!(
+        "  3B rebase:   {} identical tracked file(s) eligible",
+        report.freshness.eligible_files
+    );
+    if report.freshness.path_sensitive_outputs.is_empty() {
+        println!("  path safety: no source-worktree paths found in cached build-script directives");
+    } else {
+        println!(
+            "  path safety: {} rebasable, {} blocking build-script directive(s)",
+            report.freshness.rebasable_outputs(),
+            report.freshness.blocking_outputs()
+        );
+        for output in report.freshness.path_sensitive_outputs.iter().take(8) {
+            let state = if output.rebasable {
+                "rebasable"
+            } else {
+                "blocking"
+            };
+            println!("    [{state}] {}", output.command);
+            if let Some(reason) = &output.reason {
+                println!("      {reason}");
+            }
+        }
+        if report.freshness.blocking_outputs() > 0 {
+            if report.auto_materializable_paths.is_empty() {
+                println!(
+                    "  note:        cargo warm seed withholds mtime rebasing until blockers have equivalent destination state; --seed-path can provide unusual native state explicitly"
+                );
+            } else {
+                println!(
+                    "  auto-fork:   {} ignored final native artifact/path(s) can be materialized safely by cargo warm seed",
+                    report.auto_materializable_paths.len()
+                );
+                for path in report.auto_materializable_paths.iter().take(8) {
+                    println!("    {}", path.display());
+                }
+            }
+        }
     }
 
     for manifest in &report.manifests {

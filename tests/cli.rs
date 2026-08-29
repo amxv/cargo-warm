@@ -25,6 +25,7 @@ fn shows_help() {
         .stdout(predicate::str::contains("seed"))
         .stdout(predicate::str::contains("path"))
         .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("check"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("gc"));
 }
@@ -60,4 +61,25 @@ fn direct_status_invocation_is_supported() {
         .success()
         .stdout("cargo-warm: no recorded seeded caches\n");
     let _ = fs::remove_dir_all(cache);
+}
+
+#[test]
+fn stable_check_requires_explicit_bootstrap_opt_in() {
+    cli()
+        .arg("check")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--unstable-bootstrap"));
+}
+
+#[test]
+fn check_refuses_to_replace_an_existing_workspace_wrapper() {
+    cli()
+        .args(["check", "--unstable-bootstrap"])
+        .env("RUSTC_WORKSPACE_WRAPPER", "/tmp/existing-wrapper")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "RUSTC_WORKSPACE_WRAPPER is already set",
+        ));
 }

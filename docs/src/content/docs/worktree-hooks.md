@@ -14,7 +14,7 @@ Run this from the new worktree after Git creates it:
 cargo warm seed
 ```
 
-If `main` is checked out elsewhere in the same repository, cargo-warm discovers it automatically.
+Cargo-warm discovers active worktrees automatically and selects the nearest compatible, quiescent checkout that actually has warm state. `main` is only a tie-breaker; a nearby sibling agent branch can be a better seed.
 
 ## Explicit orchestration
 
@@ -39,6 +39,25 @@ fi
 ```
 
 Whether seed failure should block worktree creation is an orchestrator policy. cargo-warm itself fails closed when it cannot prove the requested cache operation is safe.
+
+## Relocatable compiler loop
+
+For Rust 1.98+ projects that opt into cargo-warm's relocatable incremental artifact family, use the same compiler command in the warm source checkout and new agent worktrees:
+
+```bash
+# Source checkout, periodically or after integrating work.
+cargo warm check --unstable-bootstrap --manifest-path Cargo.toml
+
+# Worktree creation hook.
+cargo warm seed --prime --unstable-bootstrap --manifest-path Cargo.toml
+
+# Agent edit loop in the new worktree.
+cargo warm check --unstable-bootstrap --manifest-path Cargo.toml
+```
+
+On nightly/dev Rust the explicit bootstrap flag is unnecessary. Stable/beta requires the opt-in because the compiler relocation switch is still unstable.
+
+`--prime` is the strongest agent-startup mode. It moves the first destination-specific rustc validation into provisioning while source bytes are still unchanged. The worktree takes longer to create, but the agent's first real edit starts from destination-native incremental state. Omit `--prime` when startup latency matters more or when the project already gets near-warm first-edit behavior from plain seeding.
 
 ## Active compilers
 

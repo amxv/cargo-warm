@@ -77,6 +77,7 @@ This makes the command easy to call from arbitrary worktree-init scripts without
 cargo warm path
 cargo warm seed
 cargo warm doctor
+cargo warm check
 cargo warm status
 cargo warm gc
 ```
@@ -98,10 +99,35 @@ Forks warm state into the destination's isolated cache.
 cargo warm seed
 cargo warm seed --from ../main --to .
 cargo warm seed --include-target
+cargo warm seed --prime --unstable-bootstrap
+cargo warm seed --seed-path path/to/native/cache
+cargo warm seed --no-freshness-rebase
 cargo warm seed --copy-fallback
 ```
 
 On modern Cargo versions with a separate `build_directory`, that directory is seeded by default. Final/link outputs in `target_directory` are skipped unless `--include-target` is requested.
+
+When `--from` is omitted, cargo-warm ranks active worktrees by Git graph distance, including nearby sibling branches. It skips worktrees that are compiling, skips incompatible toolchains, and prefers candidates that actually contain warm cache roots rather than assuming `main` is always the best seed.
+
+Build scripts sometimes link ignored native outputs that live outside Cargo's own build directory. For ordinary `rustc-link-search` + `rustc-link-lib` outputs, cargo-warm discovers those automatically and forks only the final linkable artifacts plus any required workspace-relative symlink. It deliberately avoids copying opaque native compiler caches such as Swift/Clang module caches. `--seed-path` remains a repeatable escape hatch for unusual portable native state.
+
+After cloning, cargo-warm rebases Cargo freshness conservatively: clean tracked files must have the same Git blob in both worktrees, watched build-script trees must be byte-equivalent, and checkout-local build-script paths must have a safe equivalent in the destination. Use `--no-freshness-rebase` to disable this layer.
+
+For agent worktrees where the first *edited* compile matters more than setup latency, `--prime` pays rustc's one-time relocation-validation cost during seeding. Cargo-warm temporarily advances the mtime of the package's root Rust target without changing a byte, runs the same relocatable `cargo warm check`, then restores the exact original timestamps. On stable/beta, pair it with the same explicit `--unstable-bootstrap` acknowledgement required by `cargo warm check`.
+
+On Golden Goose's ~300k-line Rust application, the measured progression was:
+
+```text
+old 3A first relocated check:       ~11m01s
+3B exact new-worktree check:          2.56s
+first real edit without prime:       75.14s
+steady-state worktree edit:          39.45s
+warm-main comparison edit:           37.88s
+seed + relocation prime:        22.65s + 60.70s
+first real edit after prime:         33.24s
+```
+
+That is why `--prime` is opt-in rather than unconditional. Small and medium crates may already get near-warm first-edit behavior directly from the forked incremental state; very large monolithic crates can choose to move the one-time validation cost into worktree provisioning so the agent starts hot.
 
 The default fast path refuses to silently turn a multi-gigabyte COW operation into a physical copy. `--copy-fallback` is an explicit opt-in.
 
@@ -125,6 +151,29 @@ cargo warm doctor --probe
 
 Probe mode runs `cargo check` with Cargo's fingerprint diagnostics enabled and classifies changed-file, build-script, dependency, environment, compiler, and filesystem misses. It can compile code when the destination is not fresh, so the non-probe mode remains the cheap default.
 
+### `check` (experimental)
+
+`cargo warm check` runs `cargo check` with a workspace-only rustc wrapper that opts local crates into rustc's relocatable incremental working-directory mode. Warm the source checkout with the same command before seeding a worktree:
+
+```bash
+# Warm main once in the relocatable artifact family.
+cargo warm check
+
+# New worktree startup.
+cargo warm seed
+
+# First compiler feedback in the worktree.
+cargo warm check
+```
+
+Rust 1.98 added the incremental behavior this relies on, but the compiler flag is still unstable. Nightly/dev toolchains can use it directly. On stable/beta, cargo-warm refuses to enable `RUSTC_BOOTSTRAP` silently; experimentation requires an explicit acknowledgement:
+
+```bash
+cargo warm check --unstable-bootstrap --workspace
+```
+
+Stable bootstrap is scoped to the one workspace crate being compiled, and cargo-warm passes compiler guards that forbid unstable source features. `RUSTC_BOOTSTRAP` is still visible to Rust's `env!` / `option_env!` macros, so stable-toolchain bootstrap mode remains explicit rather than silently changing compilation inputs. Arguments after cargo-warm's options are forwarded to `cargo check`.
+
 ### `status`
 
 Shows cache roots created by `cargo-warm` and whether their destination worktrees are still available.
@@ -141,7 +190,9 @@ cargo warm gc
 ## Safety model
 
 - Cargo and rustc remain the freshness and correctness authority.
-- `cargo-warm` does not rewrite source mtimes to trick Cargo into accepting copied local artifacts as fresh.
+- For worktrees in the same Git repository, cargo-warm may mirror mtimes only for clean tracked files whose Git blob identity is identical in source and destination. This removes checkout-time false invalidation without hiding edits from Cargo.
+- Cached build-script directives that contain the source checkout are rebased only for supported path fields whose equivalent destination path exists. Unknown or missing native paths block freshness rebasing rather than leaking state across worktrees.
+- Experimental relocatable checks still invoke rustc in the destination checkout; path-sensitive compiler inputs are revalidated rather than copied as trusted answers.
 - Source and destination build directories must be different paths.
 - Active source or destination compiler processes cause seeding to fail rather than copy a torn cache.
 - Cargo and rustc identities must match between source and destination.
