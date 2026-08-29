@@ -8,6 +8,13 @@ summary: New commands, compatibility changes, and cache behavior by release.
 
 Keep the newest release first. Focus on behavior developers notice, especially worktree compatibility, cache reuse, disk growth, and installation changes.
 
+## 0.2.1 - 2026-08-29
+
+- Strengthen `cargo warm seed --prime` so the destination re-establishes the selected package's Cargo build-script fingerprint boundary as well as its relocatable rustc state before the agent starts editing.
+- Prime only the package named by each manifest (or default members for a virtual workspace), leaving path-dependency build scripts untouched so native dependency toolchains are not needlessly awakened.
+- Preserve source bytes and restore exact timestamps after the stronger prime just as before; failed priming still leaves the already-forked private cache safe to use.
+- Golden Goose benchmark: the released 0.2.0 hook still showed a 59.22s first-edit relocation tax versus 37.04s on warm main. Priming the direct package's root target plus its own build script reduced the new-worktree first edit to 41.47s without rerunning the Swift path dependency.
+
 ## 0.2.0 - 2026-08-29
 
 - Make exact-revision worktrees Cargo-fresh immediately by rebasing tracked source and build-script freshness only after proving destination bytes are equivalent.
@@ -17,7 +24,7 @@ Keep the newest release first. Focus on behavior developers notice, especially w
 - Discover path-bearing build-script native outputs and COW-fork only final linkable artifacts plus required symlinks instead of cloning opaque Swift/Clang compiler caches.
 - Add `cargo warm doctor` diagnostics for source equivalence, path-sensitive build-script output, cache availability, and actual Cargo fingerprint rebuild reasons.
 - Preserve library-style repositories that do not commit `Cargo.lock`; metadata and priming remove a lockfile only when cargo-warm itself caused it to appear.
-- Golden Goose benchmark: an exact brand-new worktree's first no-op check fell from the old ~11m01s 3A relocation case to 2.56s versus 2.60s on warm main. With `--prime`, the first real edit checked in 33.24s versus 37.88s on warm main; steady-state worktree edits measured 39.45s.
+- Golden Goose benchmark: an exact brand-new worktree's first no-op check fell from the old ~11m01s 3A relocation case to 2.56s versus 2.60s on warm main. Follow-up release-level testing showed that the root-target-only prime could still leave a first-edit relocation tax on the largest local crate; 0.2.1 strengthens that boundary.
 
 ## 0.1.0 - 2026-08-29
 

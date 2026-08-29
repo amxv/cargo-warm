@@ -57,7 +57,7 @@ cargo warm check --unstable-bootstrap --manifest-path Cargo.toml
 
 On nightly/dev Rust the explicit bootstrap flag is unnecessary. Stable/beta requires the opt-in because the compiler relocation switch is still unstable.
 
-`--prime` is the strongest agent-startup mode. It moves the first destination-specific rustc validation into provisioning while source bytes are still unchanged. The worktree takes longer to create, but the agent's first real edit starts from destination-native incremental state. Omit `--prime` when startup latency matters more or when the project already gets near-warm first-edit behavior from plain seeding.
+`--prime` is the strongest agent-startup mode. It moves the first destination-specific Cargo build-script boundary and rustc validation into provisioning while source bytes are still unchanged. The selected direct package's own build script may run, but path-dependency build scripts are left untouched. The worktree takes longer to create, but the agent's first real edit starts from destination-native incremental state. Omit `--prime` when startup latency matters more, when a custom build is too expensive to repeat during provisioning, or when the project already gets near-warm first-edit behavior from plain seeding.
 
 ## Active compilers
 

@@ -38,7 +38,9 @@ For ignored native state referenced by `rustc-link-search` / `rustc-link-lib`, c
 
 By default, `seed` also rebases false freshness misses only when it can prove the destination is equivalent: identical clean Git blobs, equivalent watched build-script trees, and safely relocatable build-script path directives. `--no-freshness-rebase` disables that behavior.
 
-`--prime` forces one no-content-change relocatable compiler session after the fork. Cargo-warm temporarily advances the root target source mtime, runs `cargo warm check`, and restores the exact original timestamps. This converts inherited compiler state into destination-native incremental state before an agent edits anything. Stable/beta requires `--unstable-bootstrap`; nightly/dev does not.
+`--prime` forces one no-content-change relocatable compiler session after the fork. Cargo-warm temporarily advances the direct package's root target source mtime and its own `custom-build` target (`build.rs`) when present, runs `cargo warm check`, and restores the exact original timestamps. Path-dependency build scripts are not touched. This re-establishes both the package's Cargo build-script fingerprint boundary and inherited rustc state in the destination before an agent edits anything. Stable/beta requires `--unstable-bootstrap`; nightly/dev does not.
+
+Because `--prime` deliberately makes the selected package's build script stale, that build script may run during provisioning. Environment variables and other process settings are inherited by the prime, so orchestrators can use the same project-supported build-script controls they use for ordinary `cargo check`.
 
 `--copy-fallback` explicitly allows a normal physical copy if a COW/reflink clone is unavailable. It is intentionally opt-in.
 

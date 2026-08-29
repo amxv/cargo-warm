@@ -158,7 +158,7 @@ fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf
                 .is_some_and(|path| path == manifest)
         });
         if let Some(package) = direct {
-            if let Some(path) = package_trigger(package, &workspace)? {
+            for path in package_triggers(package, &workspace)? {
                 triggers.insert(path);
             }
             continue;
@@ -171,10 +171,10 @@ fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf
             .or_else(|| metadata.get("workspace_members").and_then(Value::as_array));
         if let Some(member_ids) = member_ids {
             for id in member_ids.iter().filter_map(Value::as_str) {
-                if let Some(package) = by_id.get(id)
-                    && let Some(path) = package_trigger(package, &workspace)?
-                {
-                    triggers.insert(path);
+                if let Some(package) = by_id.get(id) {
+                    for path in package_triggers(package, &workspace)? {
+                        triggers.insert(path);
+                    }
                 }
             }
         }
@@ -182,20 +182,47 @@ fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf
     Ok(triggers.into_iter().collect())
 }
 
-fn package_trigger(package: &Value, workspace: &Path) -> Result<Option<PathBuf>> {
+fn package_triggers(package: &Value, workspace: &Path) -> Result<Vec<PathBuf>> {
     let Some(targets) = package.get("targets").and_then(Value::as_array) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
+    let mut triggers = BTreeSet::new();
     let preferred = targets
         .iter()
         .find(|target| target_has_kind(target, "lib"))
         .or_else(|| targets.iter().find(|target| target_has_kind(target, "bin")))
-        .or_else(|| targets.first());
-    let Some(src_path) = preferred
-        .and_then(|target| target.get("src_path"))
-        .and_then(Value::as_str)
-    else {
-        return Ok(None);
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| !target_has_kind(target, "custom-build"))
+        });
+    if let Some(target) = preferred {
+        insert_target_source(&mut triggers, target, workspace)?;
+    }
+
+    // A package build script is a Cargo fingerprint boundary for the local
+    // crate. Re-running that boundary once in the destination makes the
+    // inherited rustc state genuinely destination-native for the first real
+    // edit. Only the selected package's own custom-build target is touched;
+    // path dependencies remain untouched and therefore do not wake unrelated
+    // native toolchains.
+    for target in targets
+        .iter()
+        .filter(|target| target_has_kind(target, "custom-build"))
+    {
+        insert_target_source(&mut triggers, target, workspace)?;
+    }
+
+    Ok(triggers.into_iter().collect())
+}
+
+fn insert_target_source(
+    triggers: &mut BTreeSet<PathBuf>,
+    target: &Value,
+    workspace: &Path,
+) -> Result<()> {
+    let Some(src_path) = target.get("src_path").and_then(Value::as_str) else {
+        return Ok(());
     };
     let path = PathBuf::from(src_path).canonicalize()?;
     if !path.starts_with(workspace) {
@@ -204,7 +231,8 @@ fn package_trigger(package: &Value, workspace: &Path) -> Result<Option<PathBuf>>
             path.display()
         );
     }
-    Ok(Some(path))
+    triggers.insert(path);
+    Ok(())
 }
 
 fn target_has_kind(target: &Value, expected: &str) -> bool {
@@ -228,27 +256,78 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            "[package]\nname='prime-fixture'\nversion='0.1.0'\nedition='2024'\n",
+            "[package]\nname='prime-fixture'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
         )
         .unwrap();
         fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+        fs::write(root.join("build.rs"), "fn main() {}\n").unwrap();
 
         let triggers = super::prime_triggers(&root, &["Cargo.toml".into()]).unwrap();
-        assert_eq!(triggers, [root.join("src/lib.rs").canonicalize().unwrap()]);
+        assert_eq!(
+            triggers,
+            [
+                root.join("build.rs").canonicalize().unwrap(),
+                root.join("src/lib.rs").canonicalize().unwrap(),
+            ]
+        );
         assert!(!root.join("Cargo.lock").exists());
 
         let original = FileTime::from_unix_time(1_600_000_000, 123);
-        set_file_mtime(&triggers[0], original).unwrap();
+        for trigger in &triggers {
+            set_file_mtime(trigger, original).unwrap();
+        }
         {
             let guard = super::TimestampGuard::touch(triggers.clone()).unwrap();
-            let changed =
-                FileTime::from_last_modification_time(&fs::metadata(&triggers[0]).unwrap());
-            assert_ne!(changed, original);
+            for trigger in &triggers {
+                let changed =
+                    FileTime::from_last_modification_time(&fs::metadata(trigger).unwrap());
+                assert_ne!(changed, original);
+            }
             guard.restore().unwrap();
             std::mem::forget(guard);
         }
-        let restored = FileTime::from_last_modification_time(&fs::metadata(&triggers[0]).unwrap());
-        assert_eq!(restored, original);
+        for trigger in &triggers {
+            let restored = FileTime::from_last_modification_time(&fs::metadata(trigger).unwrap());
+            assert_eq!(restored, original);
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_package_prime_does_not_touch_path_dependency_build_script() {
+        let root = std::env::temp_dir().join(format!(
+            "cargo-warm-prime-path-dep-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("dep/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='prime-root'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n\n[dependencies]\nprime-dep={path='dep'}\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+        fs::write(root.join("build.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            root.join("dep/Cargo.toml"),
+            "[package]\nname='prime-dep'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
+        )
+        .unwrap();
+        fs::write(root.join("dep/src/lib.rs"), "pub fn dep() {}\n").unwrap();
+        fs::write(root.join("dep/build.rs"), "fn main() {}\n").unwrap();
+
+        let triggers = super::prime_triggers(&root, &["Cargo.toml".into()]).unwrap();
+        assert_eq!(
+            triggers,
+            [
+                root.join("build.rs").canonicalize().unwrap(),
+                root.join("src/lib.rs").canonicalize().unwrap(),
+            ]
+        );
+        assert!(!triggers.contains(&root.join("dep/build.rs").canonicalize().unwrap()));
+        assert!(!triggers.contains(&root.join("dep/src/lib.rs").canonicalize().unwrap()));
+        assert!(!root.join("Cargo.lock").exists());
         let _ = fs::remove_dir_all(root);
     }
 }

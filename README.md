@@ -113,21 +113,20 @@ Build scripts sometimes link ignored native outputs that live outside Cargo's ow
 
 After cloning, cargo-warm rebases Cargo freshness conservatively: clean tracked files must have the same Git blob in both worktrees, watched build-script trees must be byte-equivalent, and checkout-local build-script paths must have a safe equivalent in the destination. Use `--no-freshness-rebase` to disable this layer.
 
-For agent worktrees where the first *edited* compile matters more than setup latency, `--prime` pays rustc's one-time relocation-validation cost during seeding. Cargo-warm temporarily advances the mtime of the package's root Rust target without changing a byte, runs the same relocatable `cargo warm check`, then restores the exact original timestamps. On stable/beta, pair it with the same explicit `--unstable-bootstrap` acknowledgement required by `cargo warm check`.
+For agent worktrees where the first *edited* compile matters more than setup latency, `--prime` pays rustc's one-time relocation-validation cost during seeding. Cargo-warm temporarily advances the mtimes of the direct package's root Rust target and, when present, that package's own `custom-build` target (`build.rs`) without changing a byte. It then runs the same relocatable `cargo warm check` and restores the exact original timestamps. Path dependencies are deliberately left untouched, so priming one package does not wake unrelated native build scripts. On stable/beta, pair it with the same explicit `--unstable-bootstrap` acknowledgement required by `cargo warm check`.
 
 On Golden Goose's ~300k-line Rust application, the measured progression was:
 
 ```text
 old 3A first relocated check:       ~11m01s
 3B exact new-worktree check:          2.56s
-first real edit without prime:       75.14s
-steady-state worktree edit:          39.45s
-warm-main comparison edit:           37.88s
-seed + relocation prime:        22.65s + 60.70s
-first real edit after prime:         33.24s
+0.2.0 released-hook first edit:      59.22s
+warm-main comparison edit:           37.04s
+0.2.1 seed + package prime:     27.40s + 79.80s
+0.2.1 first edit after prime:        41.47s
 ```
 
-That is why `--prime` is opt-in rather than unconditional. Small and medium crates may already get near-warm first-edit behavior directly from the forked incremental state; very large monolithic crates can choose to move the one-time validation cost into worktree provisioning so the agent starts hot.
+That is why `--prime` is opt-in rather than unconditional. Small and medium crates may already get near-warm first-edit behavior directly from the forked incremental state; very large monolithic crates can choose to move the one-time validation cost into worktree provisioning so the agent starts hot. Priming may intentionally rerun the selected package's own build script, so projects with expensive custom builds should decide whether that startup tradeoff is worthwhile.
 
 The default fast path refuses to silently turn a multi-gigabyte COW operation into a physical copy. `--copy-fallback` is an explicit opt-in.
 
