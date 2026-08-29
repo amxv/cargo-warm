@@ -2,9 +2,11 @@ pub mod cache;
 pub mod cli;
 pub mod commands;
 pub mod compiler;
+pub mod config;
 pub(crate) mod freshness;
 pub(crate) mod git;
 pub(crate) mod prime;
+pub(crate) mod project;
 pub mod rustc_wrapper;
 
 use anyhow::Result;

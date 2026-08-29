@@ -11,6 +11,7 @@ use filetime::{FileTime, set_file_times};
 use serde_json::Value;
 
 use crate::cache;
+use crate::config::PrimeMode;
 
 #[derive(Debug)]
 struct SavedTimes {
@@ -70,9 +71,10 @@ impl Drop for TimestampGuard {
 pub(crate) fn run(
     destination: &Path,
     manifests: &[PathBuf],
+    mode: PrimeMode,
     unstable_bootstrap: bool,
 ) -> Result<Duration> {
-    let triggers = prime_triggers(destination, manifests)?;
+    let triggers = prime_triggers(destination, manifests, mode)?;
     if triggers.is_empty() {
         bail!("could not find a Rust target source file to trigger relocation priming");
     }
@@ -125,7 +127,11 @@ pub(crate) fn run(
     Ok(started.elapsed())
 }
 
-fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf>> {
+fn prime_triggers(
+    workspace: &Path,
+    manifests: &[PathBuf],
+    mode: PrimeMode,
+) -> Result<Vec<PathBuf>> {
     let workspace = workspace.canonicalize()?;
     let mut triggers = BTreeSet::new();
     for manifest in manifests {
@@ -158,7 +164,7 @@ fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf
                 .is_some_and(|path| path == manifest)
         });
         if let Some(package) = direct {
-            for path in package_triggers(package, &workspace)? {
+            for path in package_triggers(package, &workspace, mode)? {
                 triggers.insert(path);
             }
             continue;
@@ -172,7 +178,7 @@ fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf
         if let Some(member_ids) = member_ids {
             for id in member_ids.iter().filter_map(Value::as_str) {
                 if let Some(package) = by_id.get(id) {
-                    for path in package_triggers(package, &workspace)? {
+                    for path in package_triggers(package, &workspace, mode)? {
                         triggers.insert(path);
                     }
                 }
@@ -182,7 +188,7 @@ fn prime_triggers(workspace: &Path, manifests: &[PathBuf]) -> Result<Vec<PathBuf
     Ok(triggers.into_iter().collect())
 }
 
-fn package_triggers(package: &Value, workspace: &Path) -> Result<Vec<PathBuf>> {
+fn package_triggers(package: &Value, workspace: &Path, mode: PrimeMode) -> Result<Vec<PathBuf>> {
     let Some(targets) = package.get("targets").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -206,11 +212,13 @@ fn package_triggers(package: &Value, workspace: &Path) -> Result<Vec<PathBuf>> {
     // edit. Only the selected package's own custom-build target is touched;
     // path dependencies remain untouched and therefore do not wake unrelated
     // native toolchains.
-    for target in targets
-        .iter()
-        .filter(|target| target_has_kind(target, "custom-build"))
-    {
-        insert_target_source(&mut triggers, target, workspace)?;
+    if mode == PrimeMode::Package {
+        for target in targets
+            .iter()
+            .filter(|target| target_has_kind(target, "custom-build"))
+        {
+            insert_target_source(&mut triggers, target, workspace)?;
+        }
     }
 
     Ok(triggers.into_iter().collect())
@@ -262,7 +270,12 @@ mod tests {
         fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
         fs::write(root.join("build.rs"), "fn main() {}\n").unwrap();
 
-        let triggers = super::prime_triggers(&root, &["Cargo.toml".into()]).unwrap();
+        let triggers = super::prime_triggers(
+            &root,
+            &["Cargo.toml".into()],
+            crate::config::PrimeMode::Package,
+        )
+        .unwrap();
         assert_eq!(
             triggers,
             [
@@ -317,7 +330,12 @@ mod tests {
         fs::write(root.join("dep/src/lib.rs"), "pub fn dep() {}\n").unwrap();
         fs::write(root.join("dep/build.rs"), "fn main() {}\n").unwrap();
 
-        let triggers = super::prime_triggers(&root, &["Cargo.toml".into()]).unwrap();
+        let triggers = super::prime_triggers(
+            &root,
+            &["Cargo.toml".into()],
+            crate::config::PrimeMode::Package,
+        )
+        .unwrap();
         assert_eq!(
             triggers,
             [
@@ -328,6 +346,32 @@ mod tests {
         assert!(!triggers.contains(&root.join("dep/build.rs").canonicalize().unwrap()));
         assert!(!triggers.contains(&root.join("dep/src/lib.rs").canonicalize().unwrap()));
         assert!(!root.join("Cargo.lock").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rustc_prime_skips_direct_build_script() {
+        let root = std::env::temp_dir().join(format!(
+            "cargo-warm-prime-rustc-only-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='prime-root'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn root() {}\n").unwrap();
+        fs::write(root.join("build.rs"), "fn main() {}\n").unwrap();
+
+        let triggers = super::prime_triggers(
+            &root,
+            &["Cargo.toml".into()],
+            crate::config::PrimeMode::Rustc,
+        )
+        .unwrap();
+        assert_eq!(triggers, [root.join("src/lib.rs").canonicalize().unwrap()]);
         let _ = fs::remove_dir_all(root);
     }
 }

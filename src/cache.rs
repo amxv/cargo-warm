@@ -297,24 +297,69 @@ pub(crate) fn assert_workspace_quiescent(workspace: &Path) -> Result<()> {
 }
 
 pub(crate) fn workspace_quiescent(workspace: &Path) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        workspace_quiescent_macos(workspace)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        for process_name in ["cargo", "rustc"] {
+            let output = Command::new("pgrep")
+                .args(["-x", process_name])
+                .output()
+                .with_context(|| "failed to inspect running compiler processes")?;
+            if !output.status.success() {
+                continue;
+            }
+
+            for pid in String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|pid| !pid.trim().is_empty())
+            {
+                if let Some(cwd) = process_cwd(pid.trim())?
+                    && cwd.starts_with(workspace)
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_quiescent_macos(workspace: &Path) -> Result<bool> {
+    let mut pids = Vec::new();
     for process_name in ["cargo", "rustc"] {
         let output = Command::new("pgrep")
             .args(["-x", process_name])
             .output()
             .with_context(|| "failed to inspect running compiler processes")?;
-        if !output.status.success() {
-            continue;
+        if output.status.success() {
+            pids.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|pid| !pid.is_empty())
+                    .map(str::to_owned),
+            );
         }
-
-        for pid in String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|pid| !pid.trim().is_empty())
+    }
+    if pids.is_empty() {
+        return Ok(true);
+    }
+    pids.sort();
+    pids.dedup();
+    let output = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-p", &pids.join(","), "-Fn"])
+        .output()
+        .with_context(|| "failed to inspect compiler working directories")?;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix('n')
+            && Path::new(path).starts_with(workspace)
         {
-            if let Some(cwd) = process_cwd(pid.trim())?
-                && cwd.starts_with(workspace)
-            {
-                return Ok(false);
-            }
+            return Ok(false);
         }
     }
     Ok(true)
@@ -339,35 +384,13 @@ pub(crate) fn seedable_state_count(paths: &[CargoPaths], include_target: bool) -
         .sum()
 }
 
+#[cfg(target_os = "linux")]
 fn process_cwd(pid: &str) -> Result<Option<PathBuf>> {
-    #[cfg(target_os = "linux")]
-    {
-        let path = PathBuf::from(format!("/proc/{pid}/cwd"));
-        match fs::read_link(path) {
-            Ok(path) => Ok(Some(path)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("lsof")
-            .args(["-a", "-p", pid, "-d", "cwd", "-Fn"])
-            .output()?;
-        if !output.status.success() {
-            return Ok(None);
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .find_map(|line| line.strip_prefix('n'))
-            .map(PathBuf::from))
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        Ok(None)
+    let path = PathBuf::from(format!("/proc/{pid}/cwd"));
+    match fs::read_link(path) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 

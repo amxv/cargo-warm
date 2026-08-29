@@ -1,10 +1,22 @@
 use anyhow::Result;
 
-use crate::{cache, cli::PathArgs};
+use crate::{
+    cache,
+    cli::PathArgs,
+    config::{self, SeedOverrides},
+};
 
 pub fn run(args: PathArgs) -> Result<()> {
     let workspace = cache::canonical_dir(&args.workspace)?;
-    let paths = cache::resolve_manifests(&workspace, &args.manifests)?;
+    let effective = config::resolve_seed(
+        &workspace,
+        SeedOverrides {
+            config: args.config,
+            manifests: args.manifests,
+            ..SeedOverrides::default()
+        },
+    )?;
+    let paths = cache::resolve_manifests(&workspace, &effective.manifests)?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&paths)?);
         return Ok(());

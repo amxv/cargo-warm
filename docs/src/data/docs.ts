@@ -1,19 +1,21 @@
 export const siteConfig = {
   name: "cargo-warm",
-  strapline: "Warm Rust worktrees without shared mutable state",
+  strapline: "Private warm Cargo state for every worktree",
   description:
-    "Fork warm Cargo build state into isolated worktrees so new Rust checkouts can start much closer to warm.",
+    "Fork useful Cargo and rustc state into isolated worktree caches so developers and coding agents can start closer to warm without sharing mutable build state.",
   repoUrl: "https://github.com/amxv/cargo-warm",
   accentColor: "#b7410e",
   accentColorDark: "#f28c52",
   footerSections: [
     {
       title: "cargo-warm",
-      text: "Private writable Cargo state per worktree, seeded cheaply from an already-warm checkout."
+      text: "Warm starting points for Rust worktrees, with a separate writable cache for every checkout."
     },
     {
-      title: "Correctness",
-      text: "Cargo and rustc remain responsible for freshness and incremental validation after every seed."
+      title: "Start",
+      linkPrefix: "Read: ",
+      linkHref: "/docs/quickstart",
+      linkLabel: "Quickstart"
     },
     {
       title: "Repository",
@@ -24,7 +26,7 @@ export const siteConfig = {
   ]
 } as const;
 
-export const docCategories = ["Start", "Concepts", "Operations", "Reference"] as const;
+export const docCategories = ["Start", "Integrate", "Concepts", "Operate", "Reference"] as const;
 
 export const primaryNav = [
   { href: "/docs", label: "Docs" },

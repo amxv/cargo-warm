@@ -21,10 +21,6 @@ pub(crate) struct SourceSelection {
     pub(crate) reason: String,
 }
 
-pub(crate) fn best_source_worktree(destination: &Path) -> Result<Option<SourceSelection>> {
-    Ok(source_worktree_candidates(destination)?.into_iter().next())
-}
-
 pub(crate) fn source_worktree_candidates(destination: &Path) -> Result<Vec<SourceSelection>> {
     let destination = destination.canonicalize()?;
     let destination_head = git_text(&destination, &["rev-parse", "HEAD"])?;
@@ -42,7 +38,7 @@ pub(crate) fn source_worktree_candidates(destination: &Path) -> Result<Vec<Sourc
                 &["merge-base", &candidate.head, &destination_head],
             ) else {
                 // The same repository can contain orphan/unrelated histories.
-                // They are not useful near-hit seeds for this destination.
+                // They are not useful nearby seeds for this destination.
                 continue;
             };
             let candidate_distance = git_text(
@@ -270,7 +266,7 @@ fn os_string(bytes: &[u8]) -> OsString {
 mod tests {
     use std::{fs, process::Command};
 
-    use super::best_source_worktree;
+    use super::source_worktree_candidates;
 
     fn git(workspace: &std::path::Path, args: &[&str]) {
         assert!(
@@ -311,7 +307,11 @@ mod tests {
             ],
         );
 
-        let selection = best_source_worktree(&feature).unwrap().unwrap();
+        let selection = source_worktree_candidates(&feature)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(selection.path, main.canonicalize().unwrap());
         assert!(selection.reason.starts_with("exact revision"));
 
@@ -372,7 +372,11 @@ mod tests {
         git(&destination, &["commit", "-m", "destination change"]);
         git(&main, &["reset", "--hard", "HEAD~4"]);
 
-        let selection = best_source_worktree(&destination).unwrap().unwrap();
+        let selection = source_worktree_candidates(&destination)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(selection.path, sibling.canonicalize().unwrap());
         assert!(selection.reason.starts_with("nearby branch"));
 

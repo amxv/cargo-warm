@@ -1,24 +1,24 @@
 ---
 title: Worktree hooks
-description: Integrate cargo-warm with IDEs, agents, and custom worktree provisioning scripts.
-order: 3
-category: Operations
-summary: One command after worktree creation, with explicit flags when orchestration already knows the paths.
+description: Integrate cargo-warm with IDEs, coding agents, and custom worktree managers.
+order: 4
+category: Integrate
+summary: Keep the hook tiny; put project behavior in .agents/.cargo-warm.toml.
 ---
 
-## Minimal hook
+## Recommended hook
 
-Run this from the new worktree after Git creates it:
+Commit `.agents/.cargo-warm.toml`, then run one command after Git creates the worktree:
 
 ```bash
 cargo warm seed
 ```
 
-Cargo-warm discovers active worktrees automatically and selects the nearest compatible, quiescent checkout that actually has warm state. `main` is only a tie-breaker; a nearby sibling agent branch can be a better seed.
+That is the preferred integration surface. Manifests, profile choice, bootstrap opt-in, and unusual seed paths belong in project config rather than being duplicated across every editor/agent integration.
 
-## Explicit orchestration
+## Deterministic source paths
 
-For deterministic automation, prefer explicit paths:
+If the orchestrator already knows the warm and destination paths:
 
 ```bash
 cargo warm seed \
@@ -26,11 +26,28 @@ cargo warm seed \
   --to "$NEW_WORKTREE"
 ```
 
-A hook can add one or more `--manifest-path` flags for monorepos.
+Without `--from`, cargo-warm ranks Git worktrees by graph distance, skips active/incompatible candidates, and prefers candidates that actually have warm cache roots. A nearby sibling branch can be a better source than `main`.
 
-## Best-effort integration
+## Agent compiler loop
 
-A worktree manager may choose to treat seeding as an optimization rather than a hard dependency:
+For a project using `balanced` or `deep`, keep the source and agent worktrees in the same relocatable artifact family:
+
+```bash
+# Warm source checkout after integrating work.
+cargo warm check
+
+# New agent worktree.
+cargo warm seed
+
+# Agent edit loop.
+cargo warm check
+```
+
+With `unstable-bootstrap = true` in `.agents/.cargo-warm.toml`, stable/beta projects do not need to repeat the flag in every command.
+
+## Best-effort provisioning
+
+Cargo-warm is an optimization. An orchestrator can decide that failure should fall back to an ordinary cold cache:
 
 ```bash
 if command -v cargo-warm >/dev/null 2>&1; then
@@ -38,27 +55,16 @@ if command -v cargo-warm >/dev/null 2>&1; then
 fi
 ```
 
-Whether seed failure should block worktree creation is an orchestrator policy. cargo-warm itself fails closed when it cannot prove the requested cache operation is safe.
+Cargo-warm itself fails closed when it cannot prove a requested cache operation is safe. The decision to block or continue belongs to the worktree manager.
 
-## Relocatable compiler loop
+## Project build controls
 
-For Rust 1.98+ projects that opt into cargo-warm's relocatable incremental artifact family, use the same compiler command in the warm source checkout and new agent worktrees:
+`deep` can intentionally run the selected package's own build script during provisioning. The prime inherits the hook's environment, so project-supported build-script controls can be set around `cargo warm seed` just as they would be around `cargo check`.
 
-```bash
-# Source checkout, periodically or after integrating work.
-cargo warm check --unstable-bootstrap --manifest-path Cargo.toml
+Path-dependency build scripts are deliberately not selected by the deep prime.
 
-# Worktree creation hook.
-cargo warm seed --prime --unstable-bootstrap --manifest-path Cargo.toml
+## Concurrency
 
-# Agent edit loop in the new worktree.
-cargo warm check --unstable-bootstrap --manifest-path Cargo.toml
-```
+Seeding refuses a source or destination with an active Cargo/rustc process. A worktree manager should schedule the seed before starting the agent's compiler work.
 
-On nightly/dev Rust the explicit bootstrap flag is unnecessary. Stable/beta requires the opt-in because the compiler relocation switch is still unstable.
-
-`--prime` is the strongest agent-startup mode. It moves the first destination-specific Cargo build-script boundary and rustc validation into provisioning while source bytes are still unchanged. The selected direct package's own build script may run, but path-dependency build scripts are left untouched. The worktree takes longer to create, but the agent's first real edit starts from destination-native incremental state. Omit `--prime` when startup latency matters more, when a custom build is too expensive to repeat during provisioning, or when the project already gets near-warm first-edit behavior from plain seeding.
-
-## Active compilers
-
-Seeding refuses a source or destination workspace with an active Cargo/rustc process. This avoids cloning a cache while it is being mutated.
+Different destination worktrees still receive different writable caches, so agents do not contend on one shared Cargo build directory after provisioning.

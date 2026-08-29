@@ -1,94 +1,77 @@
 ---
 title: Command reference
-description: The current cargo-warm command, diagnostics, and integration surface.
-order: 5
+description: Compact reference for cargo-warm commands and script-facing options.
+order: 8
 category: Reference
-summary: path, seed, doctor, experimental check, status, gc, and the flags intended for scripts.
+summary: doctor, seed, check, path, status, and gc.
 ---
-
-## `cargo warm path`
-
-```bash
-cargo warm path
-cargo warm path --workspace /path/to/repo
-cargo warm path --manifest-path Cargo.toml --json
-```
-
-Shows Cargo's resolved workspace, build, and target paths.
-
-## `cargo warm seed`
-
-```bash
-cargo warm seed
-cargo warm seed --from /warm/main --to /new/worktree
-cargo warm seed --manifest-path Cargo.toml
-cargo warm seed --manifest-path app/Cargo.toml --manifest-path tools/Cargo.toml
-cargo warm seed --include-target
-cargo warm seed --prime --unstable-bootstrap
-cargo warm seed --seed-path native/.build/output.a
-cargo warm seed --no-freshness-rebase
-cargo warm seed --copy-fallback
-```
-
-`--include-target` clones final/link target outputs in addition to the modern Cargo `build_directory`.
-
-Without `--from`, cargo-warm ranks active worktrees by Git graph distance. Exact revisions and nearby sibling branches can both seed a new worktree; compiling or incompatible candidates are skipped, and candidates with real warm cache roots are preferred.
-
-For ignored native state referenced by `rustc-link-search` / `rustc-link-lib`, cargo-warm automatically forks only the final linkable artifact(s) and any required workspace-relative symlink. It does not copy an entire Swift/Clang compiler cache merely because a build script links through that directory. `--seed-path` is a repeatable escape hatch for unusual portable state cargo-warm cannot infer.
-
-By default, `seed` also rebases false freshness misses only when it can prove the destination is equivalent: identical clean Git blobs, equivalent watched build-script trees, and safely relocatable build-script path directives. `--no-freshness-rebase` disables that behavior.
-
-`--prime` forces one no-content-change relocatable compiler session after the fork. Cargo-warm temporarily advances the direct package's root target source mtime and its own `custom-build` target (`build.rs`) when present, runs `cargo warm check`, and restores the exact original timestamps. Path-dependency build scripts are not touched. This re-establishes both the package's Cargo build-script fingerprint boundary and inherited rustc state in the destination before an agent edits anything. Stable/beta requires `--unstable-bootstrap`; nightly/dev does not.
-
-Because `--prime` deliberately makes the selected package's build script stale, that build script may run during provisioning. Environment variables and other process settings are inherited by the prime, so orchestrators can use the same project-supported build-script controls they use for ordinary `cargo check`.
-
-`--copy-fallback` explicitly allows a normal physical copy if a COW/reflink clone is unavailable. It is intentionally opt-in.
 
 ## `cargo warm doctor`
 
 ```bash
 cargo warm doctor
-cargo warm doctor --from /warm/main --to /new/worktree
-cargo warm doctor --manifest-path Cargo.toml --json
+cargo warm doctor --profile deep
+cargo warm doctor --from /warm/source --to /new/worktree
+cargo warm doctor --probe
+cargo warm doctor --json
 ```
 
-The default mode is read-only with respect to Cargo build state. It reports:
+Default mode is read-only with respect to build state. With no warm peer it performs project-only diagnosis. With a peer it also compares worktree freshness/path state.
 
-- whether source and destination are at the same Git revision;
-- whether both worktrees are clean;
-- tracked-file mtime skew for an exact clean revision;
-- source and destination build-cache presence;
-- local workspace packages with build scripts.
+`--probe` runs `cargo check` with Cargo fingerprint logging and can compile code.
 
-To ask Cargo why the destination actually rebuilds:
+## `cargo warm seed`
 
 ```bash
-cargo warm doctor --probe
+cargo warm seed
+cargo warm seed --profile balanced
+cargo warm seed --from /warm/source --to /new/worktree
+cargo warm seed --prime-mode rustc
+cargo warm seed --seed-path native/cache
+cargo warm seed --include-target
+cargo warm seed --no-freshness-rebase
+cargo warm seed --copy-fallback
 ```
 
-Probe mode runs `cargo check` and captures Cargo's fingerprint diagnostics. It can compile code, so use it when you want measured rebuild reasons rather than a cheap preflight.
+Important options:
 
-## `cargo warm check` (experimental)
+- `--profile <name>` selects a built-in or project-local profile.
+- `--config <path>` uses an explicit config instead of auto-discovery.
+- `--manifest-path <path>` overrides configured manifests; repeatable.
+- `--prime-mode none|rustc|package` overrides the profile's prime.
+- `--include-target` also forks target/final-output state when Cargo has a separate intermediate build directory.
+- `--seed-path <path>` adds a workspace-relative portable state path; repeatable.
+- `--no-freshness-rebase` disables safe mtime/build-script freshness synchronization.
+- `--copy-fallback` explicitly permits a physical copy when COW/reflink is unavailable.
+- `--unstable-bootstrap` explicitly allows relocatable priming on stable/beta.
+
+Legacy `--prime` remains equivalent to package priming for compatibility.
+
+## `cargo warm check`
 
 ```bash
 cargo warm check
-cargo warm check --unstable-bootstrap --workspace
-cargo warm check --unstable-bootstrap --manifest-path crates/app/Cargo.toml
+cargo warm check --profile balanced
+cargo warm check --workspace
+cargo warm check --manifest-path crates/app/Cargo.toml
 ```
 
-This creates a separate workspace-local artifact family through Cargo's workspace rustc-wrapper mechanism. Local crates are compiled with rustc's relocatable working-directory mode so a seeded worktree can load incremental state produced in another checkout.
+Runs `cargo check` with cargo-warm's workspace-only rustc wrapper. Cargo flags not consumed by cargo-warm are forwarded to `cargo check`.
 
-The source checkout must also be warmed with `cargo warm check`; an ordinary `cargo check` does not produce the same workspace-wrapper artifact family.
+Project config can provide the stable/beta bootstrap opt-in, so a configured repository can keep the command itself short.
 
-Requirements:
+Requires Rust 1.98+ for relocatable incremental state.
 
-- Rust 1.98 or newer;
-- nightly/dev toolchain for the compiler flag without environment changes; or
-- `--unstable-bootstrap` as an explicit stable/beta experiment.
+## `cargo warm path`
 
-Stable bootstrap mode scopes `RUSTC_BOOTSTRAP` to the current workspace crate and forbids unstable source features. Rust code can still observe that environment variable through `env!` / `option_env!`, so cargo-warm never enables it implicitly.
+```bash
+cargo warm path
+cargo warm path --workspace /repo
+cargo warm path --config path/to/cargo-warm.toml
+cargo warm path --manifest-path Cargo.toml --json
+```
 
-Only `cargo check` is wrapped in this first 3B slice. Build, test, and Clippy modes remain ordinary Cargo behavior until their relocation semantics and developer UX have been benchmarked separately.
+Shows Cargo's resolved workspace/build/target paths. With no manifest flags it uses the manifest set from `.agents/.cargo-warm.toml`, falling back to `Cargo.toml` when the project has no config.
 
 ## `cargo warm status`
 
@@ -96,7 +79,7 @@ Only `cargo check` is wrapped in this first 3B slice. Build, test, and Clippy mo
 cargo warm status
 ```
 
-Lists cache roots recorded by cargo-warm.
+Lists cache roots recorded as cargo-warm-owned.
 
 ## `cargo warm gc`
 
@@ -105,15 +88,4 @@ cargo warm gc --dry-run
 cargo warm gc
 ```
 
-Deletes only recorded cache roots whose destination workspaces are gone.
-
-## Development commands
-
-```bash
-just check-fast
-just check
-just build
-just docs-check
-just docs-build
-dist plan
-```
+Removes cargo-warm-owned cache roots whose destination worktrees no longer exist.

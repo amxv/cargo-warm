@@ -1,39 +1,77 @@
 ---
 title: Quickstart
-description: Seed a new Rust worktree from an already-warm checkout.
+description: Diagnose a Rust repository, choose a profile, and seed a warm worktree.
 order: 1
 category: Start
-summary: Put cargo-warm directly in a worktree creation hook.
+summary: Go from install to a worktree hook in a few commands.
 ---
 
 ## Install
-
-Install from crates.io:
 
 ```bash
 cargo install cargo-warm --locked
 ```
 
-Both invocation forms are supported:
+`cargo-warm` is a Cargo subcommand, so either spelling works:
 
 ```bash
 cargo warm --help
 cargo-warm --help
 ```
 
-## Warm the source checkout
+## 1. Ask the doctor
 
-Use Cargo normally in the checkout you want new worktrees to inherit from:
+Run this in the repository you want to optimize:
+
+```bash
+cargo warm doctor
+```
+
+You do not need a second worktree yet. In project-only mode, the doctor inspects the selected Cargo packages, Rust source size, build scripts, toolchain capabilities, and current cache shape. It recommends one of the built-in profiles and prints a starter `.agents/.cargo-warm.toml`.
+
+If another compatible worktree already exists, the doctor also compares the two checkouts and reports freshness/path issues that can affect cache reuse.
+
+## 2. Save the project config
+
+For example:
+
+```toml
+version = 1
+default-profile = "balanced"
+manifests = ["Cargo.toml"]
+unstable-bootstrap = true
+```
+
+The bootstrap line is needed only when a priming profile uses relocatable rustc state on stable/beta Rust. Nightly/dev does not need it.
+
+For a repository with several independent Cargo workspaces:
+
+```toml
+version = 1
+default-profile = "balanced"
+manifests = [
+  "app/Cargo.toml",
+  "tools/Cargo.toml",
+]
+```
+
+## 3. Warm the source checkout
+
+For `balanced` or `deep`, use the same relocatable check family that worktrees will use:
+
+```bash
+cargo warm check
+```
+
+For `quick`, ordinary Cargo state is enough:
 
 ```bash
 cargo check
 ```
 
-`cargo-warm` does not own that build. It reuses the state Cargo already created.
+The source checkout can keep evolving normally. Cargo-warm looks for compatible nearby worktrees with real warm state instead of assuming one fixed branch is always best.
 
-## Create and seed a worktree
-
-If the repository has a separate `main` worktree, the short form is enough:
+## 4. Create and seed a worktree
 
 ```bash
 git worktree add ../feature -b feature
@@ -41,26 +79,27 @@ cd ../feature
 cargo warm seed
 ```
 
-The new checkout receives its own private writable build cache. On macOS the seed uses an APFS clone. On supported Linux filesystems it uses a reflink.
+The destination receives a separate writable cache. On supported filesystems, the initial data is cloned copy-on-write/reflink rather than physically copied in full.
 
-## Use an explicit source
+## 5. Work normally
 
-Worktree managers and agent runtimes usually know both paths already:
-
-```bash
-cargo warm seed \
-  --from /repo/main \
-  --to /repo/worktrees/feature
-```
-
-That explicit form is the stable integration primitive.
-
-## Multiple Cargo workspaces
-
-Repeat `--manifest-path` when one repository contains multiple independent Cargo workspaces:
+If the project uses `balanced` or `deep`, keep using:
 
 ```bash
-cargo warm seed \
-  --manifest-path src-tauri/Cargo.toml \
-  --manifest-path src-tauri/sidecars/server/Cargo.toml
+cargo warm check
 ```
+
+Arguments after cargo-warm's options are forwarded to Cargo:
+
+```bash
+cargo warm check --workspace
+cargo warm check --manifest-path crates/app/Cargo.toml
+```
+
+For `quick`, use your normal Cargo commands.
+
+## Next steps
+
+- Read [Profiles and configuration](/docs/profiles-and-config) to tune startup behavior.
+- Read [Doctor and benchmarking](/docs/doctor-and-benchmarking) before choosing a more expensive profile.
+- Put the final command in your [worktree hook](/docs/worktree-hooks).

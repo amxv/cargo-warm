@@ -30,7 +30,12 @@ fn run_inner(args: Vec<OsString>) -> Result<ExitCode, String> {
         .ok_or_else(|| "Cargo did not pass a rustc executable".to_owned())?;
     let rustc_args: Vec<OsString> = args.collect();
 
-    let workspace_compile = env::var_os("CARGO_MANIFEST_DIR").is_some();
+    // Cargo can route rustc capability/version probes (for example `rustc
+    // -vV`) through RUSTC_WORKSPACE_WRAPPER as well. Those are not crate
+    // compilations and must remain transparent. Cargo crate compilations
+    // always carry `--crate-name`, which is also the identity we need for the
+    // scoped stable-toolchain bootstrap below.
+    let workspace_compile = crate_name(&rustc_args).is_some();
     let mut command = Command::new(&rustc);
     command.args(&rustc_args);
     command
@@ -40,9 +45,8 @@ fn run_inner(args: Vec<OsString>) -> Result<ExitCode, String> {
 
     if workspace_compile {
         if env::var_os(USE_BOOTSTRAP).is_some() {
-            let crate_name = crate_name(&rustc_args).ok_or_else(|| {
-                "workspace rustc invocation did not include --crate-name".to_owned()
-            })?;
+            let crate_name = crate_name(&rustc_args)
+                .expect("workspace_compile is true only when --crate-name is present");
             // Scope bootstrap to this one workspace crate instead of turning
             // the whole build into a nightly-like compilation. Then forbid
             // unstable source features so the only unstable capability we
@@ -93,5 +97,11 @@ mod tests {
             super::crate_name(&args),
             Some(std::ffi::OsStr::new("my_workspace_crate"))
         );
+    }
+
+    #[test]
+    fn rustc_version_probe_is_not_a_compile_invocation() {
+        let args = [OsString::from("-vV")];
+        assert_eq!(super::crate_name(&args), None);
     }
 }

@@ -48,10 +48,38 @@ impl FreshnessReport {
     }
 }
 
-pub(crate) fn analyze(
+#[cfg(test)]
+fn analyze(
     source_workspace: &Path,
     destination_workspace: &Path,
     source_build_dirs: &[PathBuf],
+) -> Result<FreshnessReport> {
+    analyze_impl(
+        source_workspace,
+        destination_workspace,
+        source_build_dirs,
+        true,
+    )
+}
+
+pub(crate) fn analyze_fast(
+    source_workspace: &Path,
+    destination_workspace: &Path,
+    source_build_dirs: &[PathBuf],
+) -> Result<FreshnessReport> {
+    analyze_impl(
+        source_workspace,
+        destination_workspace,
+        source_build_dirs,
+        false,
+    )
+}
+
+fn analyze_impl(
+    source_workspace: &Path,
+    destination_workspace: &Path,
+    source_build_dirs: &[PathBuf],
+    verify_bytes: bool,
 ) -> Result<FreshnessReport> {
     let same_repository =
         git::same_repository(source_workspace, destination_workspace).unwrap_or(false);
@@ -86,6 +114,7 @@ pub(crate) fn analyze(
         &destination_dirty,
         &mut report,
         false,
+        verify_bytes,
     )?;
     Ok(report)
 }
@@ -100,7 +129,10 @@ pub(crate) fn synchronize(
         .iter()
         .map(|(source, _)| source.clone())
         .collect();
-    let mut report = analyze(source_workspace, destination_workspace, &source_build_dirs)?;
+    // Fast analysis uses clean Git object identity to classify candidates.
+    // The mutation pass below performs the byte proof exactly once, immediately
+    // before changing destination mtimes.
+    let mut report = analyze_fast(source_workspace, destination_workspace, &source_build_dirs)?;
     if !report.same_repository {
         return Ok(report);
     }
@@ -141,6 +173,7 @@ pub(crate) fn synchronize(
         &source_dirty,
         &destination_dirty,
         &mut report,
+        true,
         true,
     )?;
     Ok(report)
@@ -271,6 +304,7 @@ fn count_entries(
     destination_dirty: &BTreeSet<PathBuf>,
     report: &mut FreshnessReport,
     apply: bool,
+    verify_bytes: bool,
 ) -> Result<()> {
     if !apply {
         report.eligible_files = 0;
@@ -312,12 +346,13 @@ fn count_entries(
         if !source_meta.file_type().is_file() || !destination_meta.file_type().is_file() {
             continue;
         }
-        // Git index identity is a strong filter, but compare the bytes before
-        // changing filesystem freshness metadata. This keeps the optimization
-        // correct even under racy-stat edge cases or unusual Git settings.
-        if !files_equal(&source, &destination)? {
-            if !apply {
-                report.different_files += 1;
+        // Git index identity is a strong filter. The fast diagnostic path can
+        // stop there; the mutating path always proves bytes immediately before
+        // changing filesystem freshness metadata.
+        if (apply || verify_bytes) && !files_equal(&source, &destination)? {
+            report.different_files += 1;
+            if apply {
+                report.eligible_files = report.eligible_files.saturating_sub(1);
             }
             continue;
         }

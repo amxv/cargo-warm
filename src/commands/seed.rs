@@ -3,20 +3,74 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::{
-    cache::{self, CacheKind},
+    cache::{self, CacheKind, CargoPaths},
     cli::SeedArgs,
+    compiler::{RustcChannel, rustc_info},
+    config::{self, PrimeMode, SeedOverrides},
     freshness, git, prime,
 };
 
+pub(crate) struct AutomaticSource {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) reason: String,
+    pub(crate) paths: Vec<CargoPaths>,
+}
+
 pub fn run(args: SeedArgs) -> Result<()> {
     let destination = cache::canonical_dir(&args.destination)?;
+    let effective = config::resolve_seed(
+        &destination,
+        SeedOverrides {
+            profile: args.profile.clone(),
+            config: args.config.clone(),
+            manifests: args.manifests.clone(),
+            include_target: args.include_target,
+            copy_fallback: args.copy_fallback,
+            seed_paths: args.seed_paths.clone(),
+            disable_freshness_rebase: args.no_freshness_rebase,
+            legacy_prime: args.prime,
+            prime_mode: args.prime_mode,
+            unstable_bootstrap: args.unstable_bootstrap,
+        },
+    )?;
+    let profile = &effective.profile;
+    println!(
+        "cargo-warm: profile {} (prime={}, freshness={}, include-target={})",
+        profile.name,
+        profile.prime,
+        if profile.freshness_rebase {
+            "on"
+        } else {
+            "off"
+        },
+        if profile.include_target { "yes" } else { "no" }
+    );
+    if let Some(path) = &effective.config_path {
+        println!("cargo-warm: config {}", path.display());
+    }
+    validate_prime_profile(&destination, profile.prime, profile.unstable_bootstrap)?;
+
     cache::assert_workspace_quiescent(&destination)?;
-    let (source, source_reason) = match args.source {
+    let (source, source_reason, pre_resolved_source_paths, source_preflighted) = match args.source {
         Some(source) => (
             cache::canonical_dir(&source)?,
             "explicit --from".to_string(),
+            None,
+            false,
         ),
-        None => select_automatic_source(&destination, &args.manifests, args.include_target)?,
+        None => {
+            let selection = select_automatic_source(
+                &destination,
+                &effective.manifests,
+                profile.include_target,
+            )?;
+            (
+                selection.path,
+                selection.reason,
+                Some(selection.paths),
+                true,
+            )
+        }
     };
     if source == destination {
         bail!("source and destination workspaces are identical");
@@ -26,15 +80,20 @@ pub fn run(args: SeedArgs) -> Result<()> {
         source.display()
     );
 
-    cache::assert_workspace_quiescent(&source)?;
-    cache::assert_compatible_toolchains(&source, &destination)?;
-    let source_paths = cache::resolve_manifests(&source, &args.manifests)?;
-    let destination_paths = cache::resolve_manifests(&destination, &args.manifests)?;
+    if !source_preflighted {
+        cache::assert_workspace_quiescent(&source)?;
+        cache::assert_compatible_toolchains(&source, &destination)?;
+    }
+    let source_paths = match pre_resolved_source_paths {
+        Some(paths) => paths,
+        None => cache::resolve_manifests(&source, &effective.manifests)?,
+    };
+    let destination_paths = cache::resolve_manifests(&destination, &effective.manifests)?;
     if source_paths.len() != destination_paths.len() {
         bail!("source and destination resolved different manifest counts");
     }
 
-    let strategy = cache::clone_strategy(args.copy_fallback)?;
+    let strategy = cache::clone_strategy(profile.copy_fallback)?;
     let mut registry = cache::read_registry()?;
     let mut seen = BTreeSet::new();
     let mut created = 0usize;
@@ -62,7 +121,7 @@ pub fn run(args: SeedArgs) -> Result<()> {
             created += 1;
         }
 
-        if args.include_target || source_paths.build_directory.is_none() {
+        if profile.include_target || source_paths.build_directory.is_none() {
             let from = &source_paths.target_directory;
             let to = &destination_paths.target_directory;
             if seen.insert(to.clone())
@@ -82,7 +141,7 @@ pub fn run(args: SeedArgs) -> Result<()> {
         }
     }
 
-    for path in &args.seed_paths {
+    for path in &profile.seed_paths {
         if cache::seed_workspace_path(&source, &destination, path, strategy)? {
             created += 1;
         }
@@ -98,7 +157,7 @@ pub fn run(args: SeedArgs) -> Result<()> {
             ))
         })
         .collect();
-    if !args.no_freshness_rebase {
+    if profile.freshness_rebase {
         let source_build_dirs: Vec<_> = build_pairs
             .iter()
             .map(|(source_build, _)| source_build.clone())
@@ -147,11 +206,11 @@ pub fn run(args: SeedArgs) -> Result<()> {
                     report.blocking_outputs()
                 );
                 eprintln!(
-                    "cargo-warm: run `cargo warm doctor` to inspect the blockers; the private 3A cache fork remains usable"
+                    "cargo-warm: run `cargo warm doctor` to inspect the blockers; the private cache fork remains usable"
                 );
             }
             Err(error) => eprintln!(
-                "cargo-warm: freshness rebase was unavailable: {error:#}; continuing with the private 3A cache fork"
+                "cargo-warm: freshness rebase was unavailable: {error:#}; continuing with the private cache fork"
             ),
         }
     }
@@ -163,13 +222,19 @@ pub fn run(args: SeedArgs) -> Result<()> {
         println!("cargo-warm: seeded {created} private state item(s)");
     }
 
-    if args.prime {
+    if profile.prime != PrimeMode::None {
         println!(
-            "cargo-warm: priming destination-native incremental state without changing source bytes"
+            "cargo-warm: {} prime: preparing destination-native incremental state without changing source bytes",
+            profile.prime
         );
-        let elapsed = prime::run(&destination, &args.manifests, args.unstable_bootstrap)
+        let elapsed = prime::run(
+            &destination,
+            &effective.manifests,
+            profile.prime,
+            profile.unstable_bootstrap,
+        )
             .with_context(|| {
-                "cache seed succeeded, but relocation prime failed; the seeded 3A/3B state remains safe to use"
+                "cache seed succeeded, but relocation prime failed; the seeded private cache remains safe to use"
             })?;
         println!(
             "cargo-warm: relocation prime completed in {:.2}s",
@@ -179,11 +244,35 @@ pub fn run(args: SeedArgs) -> Result<()> {
     Ok(())
 }
 
-fn select_automatic_source(
+fn validate_prime_profile(
+    workspace: &std::path::Path,
+    prime: PrimeMode,
+    unstable_bootstrap: bool,
+) -> Result<()> {
+    if prime == PrimeMode::None {
+        return Ok(());
+    }
+    let rustc = rustc_info(workspace)?;
+    if !rustc.relocatable_incremental_supported {
+        bail!(
+            "profile requests {prime} priming, but rustc {} predates relocatable incremental support; use profile `quick` or Rust 1.98+",
+            rustc.release
+        );
+    }
+    if matches!(rustc.channel, RustcChannel::Stable | RustcChannel::Beta) && !unstable_bootstrap {
+        bail!(
+            "profile requests {prime} priming on rustc {}; pass --unstable-bootstrap or set `unstable-bootstrap = true` in .agents/.cargo-warm.toml",
+            rustc.release
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn select_automatic_source(
     destination: &std::path::Path,
     manifests: &[std::path::PathBuf],
     include_target: bool,
-) -> Result<(std::path::PathBuf, String)> {
+) -> Result<AutomaticSource> {
     let candidates = git::source_worktree_candidates(destination)?;
     let mut fallback = None;
     for selection in candidates {
@@ -192,18 +281,23 @@ fn select_automatic_source(
         {
             continue;
         }
-        if fallback.is_none() {
-            fallback = Some((selection.path.clone(), selection.reason.clone()));
-        }
         let Ok(paths) = cache::resolve_manifests(&selection.path, manifests) else {
             continue;
         };
+        if fallback.is_none() {
+            fallback = Some(AutomaticSource {
+                path: selection.path.clone(),
+                reason: selection.reason.clone(),
+                paths: paths.clone(),
+            });
+        }
         let count = cache::seedable_state_count(&paths, include_target);
         if count > 0 {
-            return Ok((
-                selection.path,
-                format!("{}; {count} warm cache root(s)", selection.reason),
-            ));
+            return Ok(AutomaticSource {
+                path: selection.path,
+                reason: format!("{}; {count} warm cache root(s)", selection.reason),
+                paths,
+            });
         }
     }
 

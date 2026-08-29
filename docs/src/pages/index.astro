@@ -2,25 +2,31 @@
 import { getCollection } from "astro:content";
 import BaseLayout from "zuedocs/layouts/BaseLayout.astro";
 import { primaryNav, siteConfig } from "../data/docs";
+import "../styles/global.css";
 
 const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+const featuredDocs = docs.filter((entry) => [
+  "quickstart",
+  "profiles-and-config",
+  "doctor-and-benchmarking",
+  "architecture"
+].includes(entry.id));
 
-const proofPoints = [
+const profiles = [
   {
-    title: "Private build state",
-    body: "Every worktree keeps its own writable Cargo and rustc state. There is no shared mutable target directory."
+    name: "quick",
+    label: "Fastest setup",
+    detail: "Fork warm state and repair only proven freshness metadata."
   },
   {
-    title: "Cheap inheritance",
-    body: "APFS clones on macOS and reflinks on Linux let a warm checkout seed another without physically copying every block up front."
+    name: "balanced",
+    label: "Warm compiler",
+    detail: "Add a relocatable rustc prime before the first real edit."
   },
   {
-    title: "Cargo stays authoritative",
-    body: "A seed is only a starting point. Cargo and rustc still decide what is fresh, stale, or incrementally reusable."
-  },
-  {
-    title: "Built for hooks",
-    body: "Use one CLI call from an IDE, agent runtime, shell script, or Git worktree hook. No Golden Goose-specific integration is required."
+    name: "deep",
+    label: "Warm package boundary",
+    detail: "Also re-establish the selected package's own build-script boundary."
   }
 ];
 ---
@@ -31,63 +37,195 @@ const proofPoints = [
   siteConfig={siteConfig}
   primaryNav={primaryNav}
 >
-  <section class="hero shell">
-    <div class="hero__copy">
-      <p class="section-label">Rust worktree cache seeding</p>
-      <h1>New worktree. Near-warm first build.</h1>
-      <p class="hero__lede">
-        cargo-warm forks build state from a checkout that already paid the compile cost into a
-        separate writable cache for the new worktree. You keep isolation without throwing away
-        all of the useful work Cargo and rustc already did.
-      </p>
-      <div class="hero__actions">
-        <a class="button button--solid" href="/docs/quickstart">Quickstart</a>
-        <a class="button button--ghost" href="/docs/how-it-works">How it works</a>
+  <div class="cw-home">
+    <section class="shell cw-hero">
+      <div class="cw-hero__copy">
+        <div class="cw-kicker"><span></span>Rust worktree acceleration</div>
+        <h1>Keep the warm build. <em>Lose the shared state.</em></h1>
+        <p class="cw-hero__lede">
+          cargo-warm forks useful Cargo and rustc state from a warm checkout into each new
+          worktree's own writable cache. Agents start closer to warm without fighting over one
+          mutable target directory.
+        </p>
+        <div class="cw-actions">
+          <a class="cw-button cw-button--primary" href="/docs/quickstart">
+            Start in 3 commands <span>→</span>
+          </a>
+          <a class="cw-button" href="/docs/how-it-works">See how it works</a>
+        </div>
+        <div class="cw-hero__facts" aria-label="Core properties">
+          <span>Private per worktree</span>
+          <span>Copy-on-write</span>
+          <span>Cargo validated</span>
+        </div>
       </div>
-    </div>
-    <aside class="hero__panel">
-      <p class="hero__panel-label">Worktree init hook</p>
-      <div class="hero__terminal">
-        <span>$ git worktree add ../feature -b feature</span>
-        <span>$ cd ../feature</span>
-        <span>$ cargo warm seed</span>
-        <span>$ cargo check</span>
+
+      <div class="cw-machine" aria-label="Warm checkout to private worktree cache diagram">
+        <div class="cw-machine__chrome">
+          <span>cargo-warm / worktree init</span>
+          <span class="cw-machine__live"><i></i> ready</span>
+        </div>
+        <div class="cw-machine__body">
+          <div class="cw-node cw-node--source">
+            <span class="cw-node__index">01</span>
+            <div>
+              <strong>warm checkout</strong>
+              <small>Cargo build state already paid for</small>
+            </div>
+            <span class="cw-node__state">source</span>
+          </div>
+          <div class="cw-transfer">
+            <span>APFS clone / reflink</span>
+            <div><i></i><i></i><i></i></div>
+          </div>
+          <div class="cw-node cw-node--worktree">
+            <span class="cw-node__index">02</span>
+            <div>
+              <strong>private worktree cache</strong>
+              <small>independently writable from here</small>
+            </div>
+            <span class="cw-node__state">isolated</span>
+          </div>
+          <div class="cw-terminal">
+            <span class="cw-terminal__prompt">$</span><code>cargo warm seed</code>
+            <p><b>profile</b> balanced · <b>source</b> exact revision</p>
+            <p><b>cache</b> forked · <b>freshness</b> verified</p>
+            <span class="cw-terminal__prompt">$</span><code>cargo warm check</code><i class="cw-cursor"></i>
+          </div>
+        </div>
       </div>
-    </aside>
-  </section>
+    </section>
 
-  <section class="shell section-grid">
-    <div class="section-heading">
-      <p class="section-label">The model</p>
-      <h2>Fork compiler state. Do not share its writable directory.</h2>
-      <p>
-        A warm main checkout is valuable state. cargo-warm makes that state cheap to inherit while
-        keeping every agent, branch, and worktree independently writable.
-      </p>
-    </div>
-    <div class="proof-grid">
-      {proofPoints.map((item) => (
-        <article class="proof-card">
-          <h3>{item.title}</h3>
-          <p>{item.body}</p>
-        </article>
-      ))}
-    </div>
-  </section>
+    <section class="cw-strip">
+      <div class="shell cw-strip__inner">
+        <div><b>01</b><span>diagnose</span><strong>cargo warm doctor</strong></div>
+        <div class="cw-strip__arrow">→</div>
+        <div><b>02</b><span>provision</span><strong>cargo warm seed</strong></div>
+        <div class="cw-strip__arrow">→</div>
+        <div><b>03</b><span>iterate</span><strong>cargo warm check</strong></div>
+      </div>
+    </section>
 
-  <section class="shell docs-teaser">
-    <div class="section-heading">
-      <p class="section-label">Documentation</p>
-      <h2>Start with the hook, then inspect what Cargo actually reuses.</h2>
-    </div>
-    <div class="docs-teaser__grid">
-      {docs.map((entry) => (
-        <a class="docs-teaser__card" href={`/docs/${entry.id}`}>
-          <span>{entry.data.category}</span>
-          <h3>{entry.data.title}</h3>
-          <p>{entry.data.summary ?? entry.data.description}</p>
-        </a>
-      ))}
-    </div>
-  </section>
+    <section class="shell cw-section cw-section--profiles">
+      <header class="cw-section__head">
+        <div>
+          <p class="cw-overline">Profiles</p>
+          <h2>Choose where to pay the warm-up cost.</h2>
+        </div>
+        <p>
+          Small crates should not pay for heavyweight priming. Giant crates should not make the
+          first agent edit discover every relocation cost. Profiles let each repository choose.
+        </p>
+      </header>
+      <div class="cw-profile-grid">
+        {profiles.map((profile, index) => (
+          <article class:list={["cw-profile", index === 1 && "cw-profile--featured"]}>
+            <div class="cw-profile__top">
+              <span>0{index + 1}</span>
+              {index === 1 && <small>good starting point</small>}
+            </div>
+            <h3>{profile.name}</h3>
+            <p class="cw-profile__label">{profile.label}</p>
+            <p>{profile.detail}</p>
+            <code>cargo warm seed --profile {profile.name}</code>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <section class="shell cw-section cw-doctor-section">
+      <div class="cw-doctor-copy">
+        <p class="cw-overline">Doctor</p>
+        <h2>Do not guess which profile your repo needs.</h2>
+        <p>
+          Doctor works before you create a second worktree. It looks at the selected packages,
+          Rust source size, build scripts, toolchain support, and cache shape. With two worktrees,
+          it also explains freshness and path blockers.
+        </p>
+        <ul>
+          <li>Recommends a profile and alternatives worth benchmarking.</li>
+          <li>Prints a starter <code>.agents/.cargo-warm.toml</code>.</li>
+          <li><code>--probe</code> classifies Cargo's actual fingerprint misses.</li>
+        </ul>
+        <a href="/docs/doctor-and-benchmarking">Read the diagnostic guide <span>→</span></a>
+      </div>
+      <div class="cw-doctor-card">
+        <div class="cw-doctor-card__head">
+          <span>cargo warm doctor</span><span>read-only</span>
+        </div>
+        <pre><code><span class="dim">project shape</span>
+  rustc:       1.98.0 (Stable)
+  local Rust:  86,420 lines / 214 files
+  build scripts: 1 direct / 2 path deps
+
+<span class="dim">recommendation</span>
+  profile:     <b>balanced</b>
+  why:         large local crate; relocatable rustc available
+  compare:     quick, deep
+
+<span class="dim">Suggested .agents/.cargo-warm.toml</span>
+  default-profile = "balanced"
+  manifests = ["Cargo.toml"]</code></pre>
+      </div>
+    </section>
+
+    <section class="cw-architecture">
+      <div class="shell cw-section">
+        <header class="cw-section__head">
+          <div>
+            <p class="cw-overline">Safety boundary</p>
+            <h2>Copied state is a hint. Cargo is still the judge.</h2>
+          </div>
+          <p>
+            cargo-warm optimizes the starting point without inventing a second build system.
+            Unknown state stays stale; unsafe mappings fall back to ordinary Cargo revalidation.
+          </p>
+        </header>
+        <div class="cw-architecture__flow">
+          <article><span>1</span><h3>Rank</h3><p>Find a nearby compatible, quiescent worktree with real warm state.</p></article>
+          <article><span>2</span><h3>Fork</h3><p>Clone Cargo intermediates into a different writable destination path.</p></article>
+          <article><span>3</span><h3>Prove</h3><p>Synchronize freshness only across clean, equivalent inputs.</p></article>
+          <article><span>4</span><h3>Validate</h3><p>Let Cargo and rustc reopen, invalidate, and compile normally.</p></article>
+        </div>
+        <div class="cw-architecture__link">
+          <a href="/docs/architecture">Open the architecture map <span>↗</span></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="shell cw-section cw-docs-section">
+      <header class="cw-section__head">
+        <div>
+          <p class="cw-overline">Guides</p>
+          <h2>Enough internals to use it well.</h2>
+        </div>
+        <p>
+          The docs focus on setup, profiles, diagnosis, and integration. The implementation is
+          there when you need the deeper mechanics.
+        </p>
+      </header>
+      <div class="cw-doc-grid">
+        {featuredDocs.map((entry, index) => (
+          <a class="cw-doc-card" href={`/docs/${entry.id}`}>
+            <span>0{index + 1}</span>
+            <small>{entry.data.category}</small>
+            <h3>{entry.data.title}</h3>
+            <p>{entry.data.summary ?? entry.data.description}</p>
+            <b>Open guide →</b>
+          </a>
+        ))}
+      </div>
+    </section>
+
+    <section class="shell cw-closing">
+      <div>
+        <p class="cw-overline">One hook</p>
+        <h2>Let every new worktree inherit the compile work you already paid for.</h2>
+      </div>
+      <div class="cw-closing__actions">
+        <code>cargo install cargo-warm --locked</code>
+        <a class="cw-button cw-button--primary" href="/docs/quickstart">Quickstart <span>→</span></a>
+      </div>
+    </section>
+  </div>
 </BaseLayout>

@@ -5,11 +5,21 @@ use anyhow::{Context, Result, bail};
 use crate::{
     cli::CheckArgs,
     compiler::{RustcChannel, rustc_info},
+    config::{self, SeedOverrides},
     rustc_wrapper,
 };
 
 pub fn run(args: CheckArgs) -> Result<()> {
     let workspace = env::current_dir()?.canonicalize()?;
+    let effective = config::resolve_seed(
+        &workspace,
+        SeedOverrides {
+            profile: args.profile.clone(),
+            config: args.config.clone(),
+            ..SeedOverrides::default()
+        },
+    )?;
+    let unstable_bootstrap = args.unstable_bootstrap || effective.profile.unstable_bootstrap;
     let rustc = rustc_info(&workspace)?;
     if !rustc.relocatable_incremental_supported {
         bail!(
@@ -20,7 +30,7 @@ pub fn run(args: CheckArgs) -> Result<()> {
 
     let use_bootstrap = match rustc.channel {
         RustcChannel::Nightly | RustcChannel::Dev => false,
-        RustcChannel::Stable | RustcChannel::Beta if args.unstable_bootstrap => true,
+        RustcChannel::Stable | RustcChannel::Beta if unstable_bootstrap => true,
         RustcChannel::Stable | RustcChannel::Beta => bail!(
             "rustc {} exposes relocatable incremental state through an unstable compiler flag; use a nightly toolchain or explicitly pass --unstable-bootstrap",
             rustc.release

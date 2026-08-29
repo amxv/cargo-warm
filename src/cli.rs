@@ -2,11 +2,13 @@ use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::config::PrimeMode;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cargo warm",
     version,
-    about = "Fork warm Cargo build state into isolated worktrees"
+    about = "Fork warm Cargo build state into private worktree caches"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -19,9 +21,9 @@ pub enum Command {
     Path(PathArgs),
     /// Fork warm build state from one checkout into another.
     Seed(SeedArgs),
-    /// Explain whether a seeded worktree should stay warm and why Cargo rebuilds.
+    /// Diagnose the project/worktree and recommend a cargo-warm profile.
     Doctor(DoctorArgs),
-    /// Run cargo check with experimental relocatable workspace incremental state.
+    /// Run cargo check with relocatable workspace incremental state.
     Check(CheckArgs),
     /// Show cache roots created by cargo-warm.
     Status,
@@ -33,7 +35,11 @@ pub enum Command {
 pub struct PathArgs {
     #[arg(long, default_value = ".")]
     pub workspace: PathBuf,
-    #[arg(long = "manifest-path", default_value = "Cargo.toml")]
+    /// Explicit project config path. Defaults to `.agents/.cargo-warm.toml` at the Git root when present.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Cargo workspace manifest to inspect. Repeat to override configured manifests.
+    #[arg(long = "manifest-path")]
     pub manifests: Vec<PathBuf>,
     #[arg(long)]
     pub json: bool,
@@ -41,11 +47,20 @@ pub struct PathArgs {
 
 #[derive(Debug, Args)]
 pub struct SeedArgs {
+    /// Named built-in or project-local profile. Defaults to the project's configured profile.
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Explicit project config path. Defaults to `.agents/.cargo-warm.toml` at the Git root when present.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Warm checkout to seed from. Defaults to the nearest compatible worktree with usable cache state.
     #[arg(long = "from")]
     pub source: Option<PathBuf>,
+    /// Worktree that should receive the private cache.
     #[arg(long = "to", default_value = ".")]
     pub destination: PathBuf,
-    #[arg(long = "manifest-path", default_value = "Cargo.toml")]
+    /// Cargo workspace manifest to seed. Repeat for repositories with several Cargo workspaces.
+    #[arg(long = "manifest-path")]
     pub manifests: Vec<PathBuf>,
     /// Also seed Cargo's target directory when Cargo reports a separate build_directory.
     #[arg(long)]
@@ -56,20 +71,30 @@ pub struct SeedArgs {
     /// COW-clone an additional workspace-relative cache path (repeatable).
     #[arg(long = "seed-path")]
     pub seed_paths: Vec<PathBuf>,
-    /// Disable 3B freshness rebasing and keep checkout mtimes unchanged.
+    /// Disable safe freshness synchronization and keep checkout mtimes unchanged.
     #[arg(long)]
     pub no_freshness_rebase: bool,
     /// After seeding, force one no-content-change relocatable rustc session so
     /// the first real edit starts from destination-native incremental state.
-    #[arg(long)]
+    /// This is a compatibility shortcut for `--prime-mode package`.
+    #[arg(long, conflicts_with = "prime_mode")]
     pub prime: bool,
-    /// Allow --prime to use rustc's unstable relocation flag on stable/beta.
-    #[arg(long, requires = "prime")]
+    /// Override the profile's priming strategy.
+    #[arg(long, value_enum)]
+    pub prime_mode: Option<PrimeMode>,
+    /// Allow relocatable priming on stable/beta Rust for this invocation.
+    #[arg(long)]
     pub unstable_bootstrap: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
+    /// Profile to evaluate. Defaults to the project's configured profile.
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Explicit project config path. Defaults to `.agents/.cargo-warm.toml` at the Git root when present.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     /// Warm checkout to compare against. Defaults to the nearest compatible worktree.
     #[arg(long = "from")]
     pub source: Option<PathBuf>,
@@ -77,7 +102,7 @@ pub struct DoctorArgs {
     #[arg(long = "to", default_value = ".")]
     pub destination: PathBuf,
     /// Cargo workspace manifests to inspect. Repeat for repositories with multiple workspaces.
-    #[arg(long = "manifest-path", default_value = "Cargo.toml")]
+    #[arg(long = "manifest-path")]
     pub manifests: Vec<PathBuf>,
     /// Run `cargo check` with Cargo fingerprint logging and report actual rebuild reasons.
     #[arg(long)]
@@ -89,6 +114,12 @@ pub struct DoctorArgs {
 
 #[derive(Debug, Args)]
 pub struct CheckArgs {
+    /// Named built-in or project-local profile. Defaults to the project's configured profile.
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Explicit project config path. Defaults to `.agents/.cargo-warm.toml` at the Git root when present.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     /// Allow the unstable rustc relocation flag on a stable toolchain by setting
     /// RUSTC_BOOTSTRAP=1 for workspace rustc invocations. Rust code can observe
     /// that environment variable through env!/option_env!, so this is never implicit.
@@ -127,6 +158,7 @@ mod tests {
             panic!("expected check command");
         };
         assert!(args.unstable_bootstrap);
+        assert_eq!(args.profile, None);
         assert_eq!(
             args.cargo_args,
             [
@@ -151,11 +183,32 @@ mod tests {
             panic!("expected seed command");
         };
         assert!(args.prime);
+        assert_eq!(args.prime_mode, None);
         assert!(args.unstable_bootstrap);
         assert!(
             args.manifests
                 .iter()
                 .any(|path| path.ends_with("crates/app/Cargo.toml"))
+        );
+    }
+
+    #[test]
+    fn seed_accepts_named_project_profile() {
+        let cli = Cli::parse_from([
+            "cargo-warm",
+            "seed",
+            "--profile",
+            "agent",
+            "--config",
+            "config/cargo-warm.toml",
+        ]);
+        let Command::Seed(args) = cli.command else {
+            panic!("expected seed command");
+        };
+        assert_eq!(args.profile.as_deref(), Some("agent"));
+        assert_eq!(
+            args.config.as_deref(),
+            Some(std::path::Path::new("config/cargo-warm.toml"))
         );
     }
 }

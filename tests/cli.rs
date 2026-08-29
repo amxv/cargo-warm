@@ -65,11 +65,14 @@ fn direct_status_invocation_is_supported() {
 
 #[test]
 fn stable_check_requires_explicit_bootstrap_opt_in() {
+    let root = isolated_cache("stable-check-no-config");
     cli()
         .arg("check")
+        .current_dir(&root)
         .assert()
         .failure()
         .stderr(predicate::str::contains("--unstable-bootstrap"));
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -82,4 +85,64 @@ fn check_refuses_to_replace_an_existing_workspace_wrapper() {
         .stderr(predicate::str::contains(
             "RUSTC_WORKSPACE_WRAPPER is already set",
         ));
+}
+
+#[test]
+fn project_config_can_opt_stable_check_into_bootstrap() {
+    let root = isolated_cache("configured-check");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join(".agents")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='configured-check'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn configured() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".agents/.cargo-warm.toml"),
+        "version = 1\ndefault-profile = 'balanced'\nunstable-bootstrap = true\n",
+    )
+    .unwrap();
+
+    cli()
+        .arg("check")
+        .current_dir(&root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .assert()
+        .success();
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn doctor_probe_uses_the_configured_relocatable_check_family() {
+    let root = isolated_cache("doctor-probe-configured");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join(".agents")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='doctor-probe-configured'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    fs::write(
+        root.join(".agents/.cargo-warm.toml"),
+        "version = 1\ndefault-profile = 'balanced'\nunstable-bootstrap = true\n",
+    )
+    .unwrap();
+
+    cli()
+        .args(["doctor", "--probe", "--json"])
+        .current_dir(&root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"balanced\""))
+        .stdout(predicate::str::contains("\"cargo_success\": true"));
+
+    let _ = fs::remove_dir_all(root);
 }
