@@ -278,11 +278,11 @@ fn process_cwd(pid: &str) -> Result<Option<PathBuf>> {
     #[cfg(target_os = "linux")]
     {
         let path = PathBuf::from(format!("/proc/{pid}/cwd"));
-        return match fs::read_link(path) {
+        match fs::read_link(path) {
             Ok(path) => Ok(Some(path)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
-        };
+        }
     }
 
     #[cfg(target_os = "macos")]
