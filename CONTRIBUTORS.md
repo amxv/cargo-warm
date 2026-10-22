@@ -23,11 +23,10 @@ For cache behavior, prefer temporary repositories and isolated `XDG_CACHE_HOME` 
 ```bash
 just docs-install
 just docs-check
-just docs-build
 just docs-dev
 ```
 
-The documentation application is isolated under `docs/`. Run `docs-check` and `docs-build` serially.
+The documentation application is isolated under `docs/`. GitHub Actions builds the production site; routine local validation uses `docs-check`.
 
 ## Release infrastructure
 

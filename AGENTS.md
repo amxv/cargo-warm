@@ -52,12 +52,16 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Docs, run serially:
+Docs validation (production build runs in GitHub Actions):
 
 ```bash
 just docs-check
-just docs-build
 ```
+
+The `Docs` workflow deploys only for `docs/**` changes on `main`. Vercel's
+Git-triggered deployments are disabled; do not reintroduce `ignoreCommand`.
+Production deployment uses a project-scoped `VERCEL_TOKEN` Actions secret
+and `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` Actions variables.
 
 Release configuration:
 

@@ -9,7 +9,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "test:vercel": "bun test scripts/should-build.test.mjs"
+    "test:vercel": "node --test scripts/deployment.test.mjs scripts/prepare-prebuilt.test.mjs"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.4",

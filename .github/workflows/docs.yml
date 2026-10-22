@@ -4,12 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/docs.yml"
       - "docs/**"
   pull_request:
     branches: [main]
     paths:
-      - ".github/workflows/docs.yml"
       - "docs/**"
   workflow_dispatch:
 
@@ -30,6 +28,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Node for Vercel CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -38,11 +41,37 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Test Vercel affected-path logic
+      - name: Test deployment rules and static output
         run: bun run test:vercel
 
       - name: Check
         run: bun run check
 
-      - name: Build
-        run: bun run build
+      - name: Build and stage static output
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref == 'refs/heads/main'
+        run: |
+          bun run build
+          node scripts/prepare-prebuilt.mjs
+
+      - name: Deploy production docs to Vercel
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref == 'refs/heads/main'
+        # Vercel Root Directory is docs/. Run the CLI from repository root,
+        # not docs/, to avoid resolving its project path as docs/docs/.
+        working-directory: .
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VERCEL_TOKEN" || -z "$VERCEL_ORG_ID" || -z "$VERCEL_PROJECT_ID" ]]; then
+            echo 'Missing GitHub Actions Vercel token secret or project variables.' >&2
+            exit 1
+          fi
+          mkdir -p .vercel
+          mv docs/.vercel/output .vercel/output
+          npx --yes vercel@latest deploy --prebuilt --prod --yes --non-interactive
